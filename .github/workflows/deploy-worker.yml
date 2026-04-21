@@ -25,6 +25,19 @@ jobs:
             - name: Install dependencies
               run: npm install
 
+            - name: Set Cloudflare Worker Secrets
+              env:
+                  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+                  BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+                  GITHUB_TOKEN: ${{ secrets.GH_PAT }}               # Personal Access Token for triggering workflows
+                  BALE_PAYMENT_TOKEN: ${{ secrets.BALE_PAYMENT_TOKEN }}
+              run: |
+                  # Set each secret via wrangler
+                  echo "$BALE_BOT_TOKEN" | npx wrangler secret put BALE_BOT_TOKEN
+                  echo "$GITHUB_TOKEN" | npx wrangler secret put GITHUB_TOKEN
+                  echo "$BALE_PAYMENT_TOKEN" | npx wrangler secret put BALE_PAYMENT_TOKEN
+
+
             - name: Deploy to Cloudflare
               uses: cloudflare/wrangler-action@v3
               with:
