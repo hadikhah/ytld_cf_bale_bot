@@ -1,0 +1,15 @@
+name = "bale-yt-bot"
+main = "src/worker.ts"
+compatibility_date = "2025-01-01"
+
+# Bind KV namespaces – create these in Cloudflare dashboard first
+kv_namespaces = [
+  { binding = "BOT_STATE", id = "c14bfe9bf90146208b85e9bd165685c8" },
+  { binding = "USER_PLANS", id = "d644e50e83a04540884bf97745e8bcce" }
+]
+
+[env.production]
+vars = { GITHUB_REPO = "mahadikhah/ytld_cf_bale_bot" }
+
+# Optional: routes / custom domain
+# routes = [{ pattern = "bot.yourdomain.com", custom_domain = true }]
