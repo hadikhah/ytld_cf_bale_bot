@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling version
+// worker/src/worker.ts - Polling version with callback safety
 import { Hono } from 'hono';
 
 export interface Env {
@@ -24,7 +24,7 @@ async function answerCallbackSafe(env: Env, callbackId: string, text?: string, s
   }
 }
 
-// ---------- Helpers (same as before) ----------
+// ---------- Helpers ----------
 async function callBaleApi(env: Env, method: string, body: any) {
   const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`;
   const resp = await fetch(url, {
@@ -73,38 +73,36 @@ async function processUpdate(env: Env, update: any) {
   // Handle callback queries
   if (update.callback_query) {
     const cb = update.callback_query;
+    console.log('Callback query received:', JSON.stringify(cb, null, 2));
+    
     const cbData = cb.data;
-    const chatId = cb.message.chat.id;
+    const chatId = cb.message?.chat?.id;
     const callbackId = cb.id;
 
-      // Validate required fields
+    // Validate required fields
     if (!chatId || !callbackId) {
       console.error('Invalid callback_query: missing chatId or callbackId', cb);
       return;
     }
 
-      // If no callback data, answer with a generic message
+    // If no callback data, answer with a generic message
     if (!cbData) {
-      await callBaleApi(env, 'answerCallbackQuery', {
-        callback_query_id: callbackId,
-        text: 'This button has no action.',
-        show_alert: false
-      });
+      console.warn('Callback query missing "data" field');
+      await answerCallbackSafe(env, callbackId, 'This button has no action.');
       return;
     }
 
-    
     if (cbData.startsWith('format|')) {
       const parts = cbData.split('|');
       if (parts.length < 3) {
-        await answerCallbackSafe(env, callbackId, 'Invalid selection.', true);
+        await answerCallbackSafe(env, callbackId, 'Invalid format selection.', true);
         return;
       }
       try {
         const [, encodedUrl, encodedFormat] = parts;
         const videoUrl = decodeURIComponent(encodedUrl);
         const formatId = decodeURIComponent(encodedFormat);
-  
+
         await answerCallbackSafe(env, callbackId, 'Download started...');
         await triggerWorkflow(env, {
           action: 'download',
@@ -122,11 +120,10 @@ async function processUpdate(env: Env, update: any) {
       }
     } else if (cbData === 'check_premium') {
       const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
-      await callBaleApi(env, 'answerCallbackQuery', {
-        callback_query_id: callbackId,
-        text: hasPremium ? '✅ You have premium access.' : '❌ No premium subscription found.',
-        show_alert: true
-      });
+      await answerCallbackSafe(env, callbackId,
+        hasPremium ? '✅ You have premium access.' : '❌ No premium subscription found.',
+        true
+      );
     } else {
       await answerCallbackSafe(env, callbackId, 'Unknown action.');
     }
@@ -303,26 +300,18 @@ app.get('/payment/callback', async (c) => {
 
 // ---------- Export Handlers ----------
 export default {
-  // Cron trigger (runs every minute)
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     await pollUpdates(env);
   },
-
-  // HTTP handler (for payment callback and manual triggers)
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-
-    // Handle payment callback
     if (url.pathname === '/payment/callback') {
       return app.fetch(request, env, ctx);
     }
-
-    // Optional manual trigger endpoint
     if (url.pathname === '/poll' && request.method === 'GET') {
       await pollUpdates(env);
       return Response.json({ ok: true });
     }
-
     return new Response('Not found', { status: 404 });
   }
 };
