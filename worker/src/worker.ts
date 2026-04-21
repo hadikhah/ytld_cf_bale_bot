@@ -1,7 +1,5 @@
 // worker/src/worker.ts - Polling version
 import { Hono } from 'hono';
-import { decodeURIComponent } from 'worker:url';
-
 
 export interface Env {
   BOT_STATE: KVNamespace;
