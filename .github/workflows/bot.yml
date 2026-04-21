@@ -61,4 +61,5 @@ jobs:
           path: |
             bot.log
             yt-dlp.log
+            yt-dlp-error.log
           retention-days: 7
