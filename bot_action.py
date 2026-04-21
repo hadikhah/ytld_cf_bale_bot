@@ -123,9 +123,10 @@ def split_and_send(file_path, base_name):
     file_size = os.path.getsize(file_path)
     if file_size <= MAX_FILE_SIZE:
         # Prefer sendVideo for MP4 files
-        if send_video(file_path):
-            return
-        elif send_document(file_path):
+        # if send_video(file_path):
+        #     return
+        # el
+        if send_document(file_path):
             return
         else:
             raise Exception("Failed to send file (both document and video methods).")
@@ -143,9 +144,9 @@ def split_and_send(file_path, base_name):
         if not os.path.exists(chunk): break
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending part {part} ({chunk_size//1024//1024} MB)")
-        if not send_video(chunk):
-            if not send_document(chunk):
-                raise Exception(f"Failed to send part {part}")
+        # if not send_video(chunk):
+          if not send_document(chunk):
+              raise Exception(f"Failed to send part {part}")
         os.remove(chunk)
         part += 1
         time.sleep(0.5)
