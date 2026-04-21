@@ -11,7 +11,7 @@ VIDEO_URL = os.environ["VIDEO_URL"]
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
 
 TEMP_DIR = "temp_videos"
-MAX_FILE_SIZE = 20 * 1024 * 1024   # 20 MB chunks to be safe (Bale limit 50 MB)
+MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks to stay safely under Bale's 50 MB limit
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -122,9 +122,10 @@ def download_video(url, format_id, output_path):
 def split_and_send(file_path, base_name):
     file_size = os.path.getsize(file_path)
     if file_size <= MAX_FILE_SIZE:
-        if send_document(file_path):
+        # Prefer sendVideo for MP4 files
+        if send_video(file_path):
             return
-        elif send_video(file_path):
+        elif send_document(file_path):
             return
         else:
             raise Exception("Failed to send file (both document and video methods).")
@@ -142,8 +143,8 @@ def split_and_send(file_path, base_name):
         if not os.path.exists(chunk): break
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending part {part} ({chunk_size//1024//1024} MB)")
-        if not send_document(chunk):
-            if not send_video(chunk):
+        if not send_video(chunk):
+            if not send_document(chunk):
                 raise Exception(f"Failed to send part {part}")
         os.remove(chunk)
         part += 1
@@ -188,6 +189,13 @@ def main():
     except Exception as e:
         logger.exception("Action failed")
         send_message(f"⚠️ Error: {str(e)[:200]}")
+        # If download fails, ensure the file is saved as an artifact
+        if 'out_file' in locals() and os.path.exists(out_file):
+            logger.info(f"Uploading failed file as artifact: {out_file}")
+            # The upload-artifact step in the workflow will pick up files in TEMP_DIR
+            os.makedirs("artifacts", exist_ok=True)
+            os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
+        raise
 
 if __name__ == "__main__":
     main()
