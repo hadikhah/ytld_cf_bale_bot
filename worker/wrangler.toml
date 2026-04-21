@@ -8,6 +8,9 @@ kv_namespaces = [
   { binding = "USER_PLANS", id = "d644e50e83a04540884bf97745e8bcce" }
 ]
 
+[triggers]
+crons = ["* * * * *"]
+
 [env.production]
 vars = { GITHUB_REPO = "mahadikhah/ytld_cf_bale_bot" }
 
