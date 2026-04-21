@@ -1,3 +1,4 @@
+// worker/src/worker.ts - Polling version
 import { Hono } from 'hono';
 
 export interface Env {
@@ -11,7 +12,7 @@ export interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// ---------- Helpers ----------
+// ---------- Helpers (same as before) ----------
 async function callBaleApi(env: Env, method: string, body: any) {
   const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`;
   const resp = await fetch(url, {
@@ -55,14 +56,11 @@ function extractYouTubeId(text: string): string | null {
   return null;
 }
 
-// ---------- Webhook Handler ----------
-app.post('/webhook', async (c) => {
-  const env = c.env;
-  const body = await c.req.json();
-
-  // Callback queries (inline button presses)
-  if (body.callback_query) {
-    const cb = body.callback_query;
+// ---------- Core Update Processor ----------
+async function processUpdate(env: Env, update: any) {
+  // Handle callback queries
+  if (update.callback_query) {
+    const cb = update.callback_query;
     const cbData = cb.data;
     const chatId = cb.message.chat.id;
     const callbackId = cb.id;
@@ -91,12 +89,12 @@ app.post('/webhook', async (c) => {
         show_alert: true
       });
     }
-    return c.json({ ok: true });
+    return;
   }
 
-  // Regular messages
-  const message = body.message;
-  if (!message?.text) return c.json({ ok: true });
+  // Handle messages
+  const message = update.message;
+  if (!message?.text) return;
 
   const chatId = message.chat.id;
   const text = message.text.trim();
@@ -112,7 +110,7 @@ app.post('/webhook', async (c) => {
       parse_mode: 'Markdown',
       reply_markup: keyboard
     });
-    return c.json({ ok: true });
+    return;
   }
 
   if (text === '/buy') {
@@ -122,7 +120,7 @@ app.post('/webhook', async (c) => {
         chat_id: chatId,
         text: 'You already have an active premium subscription!'
       });
-      return c.json({ ok: true });
+      return;
     }
 
     const invoiceResp = await fetch('https://api.bale.ai/payment/v1/invoice', {
@@ -132,9 +130,9 @@ app.post('/webhook', async (c) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        amount: 1500000, // Rials
+        amount: 1500000,
         description: 'YouTube Bot Premium (30 days)',
-        callback_url: `https://${c.req.header('host')}/payment/callback?user_id=${chatId}`,
+        callback_url: `https://${env.GITHUB_REPO.split('/')[0]}.workers.dev/payment/callback?user_id=${chatId}`,
         payer_name: `TelegramUser${chatId}`,
       })
     });
@@ -143,7 +141,7 @@ app.post('/webhook', async (c) => {
         chat_id: chatId,
         text: '❌ Payment service unavailable. Please try later.'
       });
-      return c.json({ ok: true });
+      return;
     }
     const invoiceData = await invoiceResp.json() as any;
     const paymentUrl = invoiceData.payment_url;
@@ -159,7 +157,7 @@ app.post('/webhook', async (c) => {
       text: 'Click below to complete payment. After payment, use /status to check activation.',
       reply_markup: payKeyboard
     });
-    return c.json({ ok: true });
+    return;
   }
 
   if (text === '/status') {
@@ -170,7 +168,7 @@ app.post('/webhook', async (c) => {
       msg += `\nExpires: ${new Date(parseInt(expiry) * 1000).toLocaleString()}`;
     }
     await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: msg });
-    return c.json({ ok: true });
+    return;
   }
 
   const videoId = extractYouTubeId(text);
@@ -185,17 +183,52 @@ app.post('/webhook', async (c) => {
       chat_id: chatId,
       text: '🔍 Fetching available qualities...'
     });
-    return c.json({ ok: true });
+    return;
   }
 
   await callBaleApi(env, 'sendMessage', {
     chat_id: chatId,
     text: 'Please send a valid YouTube URL.'
   });
-  return c.json({ ok: true });
-});
+}
 
-// ---------- Payment Callback ----------
+// ---------- Polling Function (Cron Trigger) ----------
+async function pollUpdates(env: Env) {
+  const OFFSET_KEY = 'last_update_id';
+  let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
+
+  const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
+  const params = new URLSearchParams({
+    offset: offset.toString(),
+    timeout: '30'
+  });
+
+  try {
+    const resp = await fetch(`${url}?${params}`, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await resp.json() as any;
+
+    if (!data.ok) {
+      console.error('getUpdates error:', data);
+      return;
+    }
+
+    const updates = data.result || [];
+    for (const update of updates) {
+      offset = Math.max(offset, update.update_id + 1);
+      await processUpdate(env, update);
+    }
+
+    if (updates.length > 0) {
+      await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
+    }
+  } catch (err) {
+    console.error('Polling error:', err);
+  }
+}
+
+// ---------- Payment Callback (still HTTP) ----------
 app.get('/payment/callback', async (c) => {
   const env = c.env;
   const userId = c.req.query('user_id');
@@ -223,4 +256,28 @@ app.get('/payment/callback', async (c) => {
   return c.text('OK');
 });
 
-export default app;
+// ---------- Export Handlers ----------
+export default {
+  // Cron trigger (runs every minute)
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    await pollUpdates(env);
+  },
+
+  // HTTP handler (for payment callback and manual triggers)
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Handle payment callback
+    if (url.pathname === '/payment/callback') {
+      return app.fetch(request, env, ctx);
+    }
+
+    // Optional manual trigger endpoint
+    if (url.pathname === '/poll' && request.method === 'GET') {
+      await pollUpdates(env);
+      return Response.json({ ok: true });
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+};
