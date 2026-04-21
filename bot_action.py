@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, sys, json, logging, subprocess, time, requests, re
 from pathlib import Path
+from urllib.parse import quote
 
 TOKEN = os.environ["BALE_BOT_TOKEN"]
 BASE_URL = f"https://tapi.bale.ai/bot{TOKEN}"
@@ -58,7 +59,6 @@ def get_video_formats(url):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.error(f"yt-dlp stderr:\n{result.stderr}")
-        # Also write to a separate file for artifact
         with open("yt-dlp-error.log", "w") as f:
             f.write(f"STDERR:\n{result.stderr}\n\nSTDOUT:\n{result.stdout}")
         raise Exception(f"Failed to get video info. Check yt-dlp-error.log artifact.")
@@ -132,7 +132,8 @@ def main():
                 return
             buttons, row = [], []
             for f in formats[:6]:
-                cb = f"format|{VIDEO_URL}|{f['format_id']}"
+                # URL-encode video URL and format ID to safely embed in callback data
+                cb = f"format|{quote(VIDEO_URL, safe='')}|{quote(f['format_id'], safe='')}"
                 row.append({"text": f["label"], "callback_data": cb})
                 if len(row) == 2:
                     buttons.append(row); row = []
