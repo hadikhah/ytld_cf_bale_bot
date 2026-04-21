@@ -194,6 +194,10 @@ async function processUpdate(env: Env, update: any) {
 
 // ---------- Polling Function (Cron Trigger) ----------
 async function pollUpdates(env: Env) {
+  if (!env.BOT_STATE) {
+    console.error('pollUpdates: BOT_STATE is undefined');
+    return;
+  }
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
 
