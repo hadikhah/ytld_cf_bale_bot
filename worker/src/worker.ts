@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling version with enhanced logging and fixes
+// worker/src/worker.ts - Polling with loop and immediate callback answers
 import { Hono } from 'hono';
 
 export interface Env {
@@ -107,16 +107,19 @@ async function processUpdate(env: Env, update: any) {
         const videoUrl = decodeURIComponent(encodedUrl);
         const formatId = decodeURIComponent(encodedFormat);
 
+        // Answer immediately to avoid timeout
         await answerCallbackSafe(env, callbackId, 'Download started...');
+        await callBaleApi(env, 'sendMessage', {
+          chat_id: chatId,
+          text: '⏳ Download queued. You will receive the file shortly.'
+        });
+
+        // Trigger workflow (this can take a bit)
         await triggerWorkflow(env, {
           action: 'download',
           chat_id: chatId.toString(),
           video_url: videoUrl,
           format_id: formatId
-        });
-        await callBaleApi(env, 'sendMessage', {
-          chat_id: chatId,
-          text: '⏳ Download queued. You will receive the file shortly.'
         });
       } catch (e) {
         console.error('Callback processing error:', e);
@@ -130,7 +133,6 @@ async function processUpdate(env: Env, update: any) {
         return;
       }
       const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`);
-      console.log(`Premium status: ${hasPremium}`);
       const msg = hasPremium === 'true' ? '✅ You have premium access.' : '❌ No premium subscription found.';
       await answerCallbackSafe(env, callbackId, msg, true);
     } else {
@@ -198,7 +200,7 @@ async function processUpdate(env: Env, update: any) {
       console.error('Bale invoice creation failed:', invoiceResp.status, errText);
       await callBaleApi(env, 'sendMessage', {
         chat_id: chatId,
-        text: `❌ Payment service error (${invoiceResp.status}). Please try later.`
+        text: `❌ Payment service temporarily unavailable (${invoiceResp.status}). Please try later.`
       });
       return;
     }
@@ -252,7 +254,7 @@ async function processUpdate(env: Env, update: any) {
   });
 }
 
-// ---------- Polling Function ----------
+// ---------- Polling Function with Loop ----------
 async function pollUpdates(env: Env) {
   if (!env.BOT_STATE) {
     console.error('BOT_STATE undefined');
@@ -261,34 +263,44 @@ async function pollUpdates(env: Env) {
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
 
-  const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
-  const params = new URLSearchParams({ offset: offset.toString(), timeout: '30' });
+  // Loop up to 5 times to process pending updates quickly
+  for (let i = 0; i < 5; i++) {
+    const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
+    const params = new URLSearchParams({
+      offset: offset.toString(),
+      timeout: '5' // shorter timeout to loop faster
+    });
 
-  try {
-    const resp = await fetch(`${url}?${params}`, { headers: { 'Content-Type': 'application/json' } });
-    const data = await resp.json() as any;
+    try {
+      const resp = await fetch(`${url}?${params}`, { headers: { 'Content-Type': 'application/json' } });
+      const data = await resp.json() as any;
 
-    if (!data.ok) {
-      console.error('getUpdates error:', data);
-      return;
-    }
-
-    const updates = data.result || [];
-    console.log(`Received ${updates.length} updates`);
-    for (const update of updates) {
-      offset = Math.max(offset, update.update_id + 1);
-      try {
-        await processUpdate(env, update);
-      } catch (err) {
-        console.error('Error processing update:', err, JSON.stringify(update));
+      if (!data.ok) {
+        console.error('getUpdates error:', data);
+        break;
       }
-    }
 
-    if (updates.length > 0) {
+      const updates = data.result || [];
+      console.log(`Loop ${i+1}: Received ${updates.length} updates`);
+      if (updates.length === 0) break; // no more updates
+
+      for (const update of updates) {
+        offset = Math.max(offset, update.update_id + 1);
+        try {
+          await processUpdate(env, update);
+        } catch (err) {
+          console.error('Error processing update:', err, JSON.stringify(update));
+        }
+      }
+
       await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
+
+      // Small delay between loops
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (err) {
+      console.error('Polling error:', err);
+      break;
     }
-  } catch (err) {
-    console.error('Polling error:', err);
   }
 }
 
