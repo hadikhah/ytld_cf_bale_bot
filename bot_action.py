@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+import os, sys, json, logging, subprocess, time, requests, re
+from pathlib import Path
+
+TOKEN = os.environ["BALE_BOT_TOKEN"]
+BASE_URL = f"https://tapi.bale.ai/bot{TOKEN}"
+ACTION = os.environ["ACTION"]
+CHAT_ID = int(os.environ["CHAT_ID"])
+VIDEO_URL = os.environ["VIDEO_URL"]
+FORMAT_ID = os.environ.get("FORMAT_ID", "")
+
+TEMP_DIR = "temp_videos"
+MAX_FILE_SIZE = 48 * 1024 * 1024
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger(__name__)
+
+def send_message(text, reply_markup=None):
+    url = f"{BASE_URL}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"Send message failed: {e}")
+
+def send_document(file_path):
+    url = f"{BASE_URL}/sendDocument"
+    with open(file_path, "rb") as f:
+        files = {"document": f}
+        data = {"chat_id": CHAT_ID}
+        try:
+            r = requests.post(url, data=data, files=files, timeout=120)
+            return r.ok
+        except Exception as e:
+            logger.error(f"Send document error: {e}")
+            return False
+
+def send_video(file_path):
+    url = f"{BASE_URL}/sendVideo"
+    with open(file_path, "rb") as f:
+        files = {"video": f}
+        data = {"chat_id": CHAT_ID}
+        try:
+            r = requests.post(url, data=data, files=files, timeout=120)
+            return r.ok
+        except Exception as e:
+            logger.error(f"Send video error: {e}")
+            return False
+
+def get_video_formats(url):
+    cmd = ["yt-dlp", "--cookies", "cookies.txt", "--remote-components", "ejs:github",
+           "--extractor-args", "youtube:skip=webpage", "--no-check-certificates",
+           "--dump-json", url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Exception("Failed to get video info")
+    data = json.loads(result.stdout)
+    title = data.get("title", "Unknown")
+    duration = data.get("duration", 0)
+    formats = []
+    for f in data.get("formats", []):
+        if f.get("vcodec") == "none": continue
+        height = f.get("height") or 0
+        if height == 0: continue
+        size = f.get("filesize") or f.get("filesize_approx") or 0
+        label = f"{height}p" + (f" (~{size//1024//1024} MB)" if size else "")
+        formats.append({"format_id": f["format_id"], "label": label, "height": height})
+    seen = set()
+    unique = []
+    for f in formats:
+        if f["format_id"] not in seen:
+            seen.add(f["format_id"])
+            unique.append(f)
+    unique.sort(key=lambda x: -x["height"])
+    return title, duration, unique
+
+def download_video(url, format_id, output_path):
+    cmd = ["yt-dlp", "--cookies", "cookies.txt", "--remote-components", "ejs:github",
+           "--extractor-args", "youtube:skip=webpage", "--no-check-certificates",
+           "-f", f"{format_id}+bestaudio[ext=m4a]/bestaudio",
+           "--merge-output-format", "mp4", "-o", output_path, url]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise Exception("Download failed")
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        raise Exception("Downloaded file empty")
+    return output_path
+
+def split_and_send(file_path, base_name):
+    file_size = os.path.getsize(file_path)
+    if file_size <= MAX_FILE_SIZE:
+        if not send_document(file_path):
+            send_video(file_path)
+        return
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    ext = os.path.splitext(file_path)[1]
+    base = os.path.basename(file_path).replace(ext, "")
+    pattern = os.path.join(TEMP_DIR, f"{base}_part_%03d{ext}")
+    cmd = ["ffmpeg", "-i", file_path, "-c", "copy", "-map", "0", "-f", "segment",
+           "-segment_time", "999999", "-reset_timestamps", "1", "-fs", str(MAX_FILE_SIZE), pattern]
+    subprocess.run(cmd, check=True, capture_output=True)
+    part = 1
+    while True:
+        chunk = os.path.join(TEMP_DIR, f"{base}_part_{part:03d}{ext}")
+        if not os.path.exists(chunk): break
+        if not send_document(chunk):
+            send_video(chunk)
+        os.remove(chunk)
+        part += 1
+        time.sleep(0.5)
+
+def cleanup():
+    if os.path.exists(TEMP_DIR):
+        for f in Path(TEMP_DIR).glob("*"): f.unlink()
+        os.rmdir(TEMP_DIR)
+
+def main():
+    logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
+    try:
+        if ACTION == "formats":
+            title, duration, formats = get_video_formats(VIDEO_URL)
+            if not formats:
+                send_message("❌ No downloadable formats found.")
+                return
+            buttons, row = [], []
+            for f in formats[:6]:
+                cb = f"format|{VIDEO_URL}|{f['format_id']}"
+                row.append({"text": f["label"], "callback_data": cb})
+                if len(row) == 2:
+                    buttons.append(row); row = []
+            if row: buttons.append(row)
+            dur_str = f"{duration//60}:{duration%60:02d}" if duration else "unknown"
+            send_message(f"🎥 *{title}*\n⏱️ {dur_str}\n\nSelect quality:", {"inline_keyboard": buttons})
+        elif ACTION == "download":
+            if not FORMAT_ID: raise ValueError("Missing format_id")
+            send_message("⏳ Downloading and processing video...")
+            video_id = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', VIDEO_URL)
+            video_id = video_id.group(1) if video_id else "video"
+            out_file = os.path.join(TEMP_DIR, f"{video_id}_{FORMAT_ID}.mp4")
+            os.makedirs(TEMP_DIR, exist_ok=True)
+            download_video(VIDEO_URL, FORMAT_ID, out_file)
+            file_size = os.path.getsize(out_file)
+            send_message(f"📤 Uploading file ({file_size//1024//1024} MB)...")
+            split_and_send(out_file, f"{video_id}_{FORMAT_ID}")
+            send_message("✅ Download complete!")
+            os.remove(out_file)
+            cleanup()
+    except Exception as e:
+        logger.exception("Action failed")
+        send_message(f"⚠️ Error: {str(e)[:200]}")
+
+if __name__ == "__main__":
+    main()
