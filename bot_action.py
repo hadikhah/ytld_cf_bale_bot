@@ -24,33 +24,45 @@ def send_message(text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if not r.ok:
+            logger.error(f"Send message failed: {r.status_code} {r.text}")
     except Exception as e:
-        logger.error(f"Send message failed: {e}")
+        logger.error(f"Send message exception: {e}")
 
 def send_document(file_path):
     url = f"{BASE_URL}/sendDocument"
-    with open(file_path, "rb") as f:
-        files = {"document": f}
-        data = {"chat_id": CHAT_ID}
-        try:
+    try:
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": CHAT_ID}
             r = requests.post(url, data=data, files=files, timeout=120)
-            return r.ok
-        except Exception as e:
-            logger.error(f"Send document error: {e}")
-            return False
+            if r.ok:
+                logger.info(f"Document sent: {file_path}")
+                return True
+            else:
+                logger.error(f"sendDocument failed: {r.status_code} {r.text}")
+                return False
+    except Exception as e:
+        logger.error(f"sendDocument exception: {e}")
+        return False
 
 def send_video(file_path):
     url = f"{BASE_URL}/sendVideo"
-    with open(file_path, "rb") as f:
-        files = {"video": f}
-        data = {"chat_id": CHAT_ID}
-        try:
+    try:
+        with open(file_path, "rb") as f:
+            files = {"video": f}
+            data = {"chat_id": CHAT_ID}
             r = requests.post(url, data=data, files=files, timeout=120)
-            return r.ok
-        except Exception as e:
-            logger.error(f"Send video error: {e}")
-            return False
+            if r.ok:
+                logger.info(f"Video sent: {file_path}")
+                return True
+            else:
+                logger.error(f"sendVideo failed: {r.status_code} {r.text}")
+                return False
+    except Exception as e:
+        logger.error(f"sendVideo exception: {e}")
+        return False
 
 def get_video_formats(url):
     cmd = ["yt-dlp", "--cookies", "cookies.txt", "--remote-components", "ejs:github",
@@ -61,7 +73,7 @@ def get_video_formats(url):
         logger.error(f"yt-dlp stderr:\n{result.stderr}")
         with open("yt-dlp-error.log", "w") as f:
             f.write(f"STDERR:\n{result.stderr}\n\nSTDOUT:\n{result.stdout}")
-        raise Exception(f"Failed to get video info. Check yt-dlp-error.log artifact.")
+        raise Exception("Failed to get video info. Check yt-dlp-error.log artifact.")
     data = json.loads(result.stdout)
     title = data.get("title", "Unknown")
     duration = data.get("duration", 0)
@@ -71,7 +83,16 @@ def get_video_formats(url):
         height = f.get("height") or 0
         if height == 0: continue
         size = f.get("filesize") or f.get("filesize_approx") or 0
-        label = f"{height}p" + (f" (~{size//1024//1024} MB)" if size else "")
+        vcodec = f.get("vcodec", "").split(".")[0]
+        format_note = f.get("format_note", "")
+        # Build descriptive label
+        label = f"{height}p"
+        if format_note and format_note != str(height):
+            label += f" {format_note}"
+        if vcodec and vcodec not in label:
+            label += f" ({vcodec})"
+        if size:
+            label += f" ~{size//1024//1024} MB"
         formats.append({"format_id": f["format_id"], "label": label, "height": height})
     seen = set()
     unique = []
@@ -80,6 +101,7 @@ def get_video_formats(url):
             seen.add(f["format_id"])
             unique.append(f)
     unique.sort(key=lambda x: -x["height"])
+    logger.info(f"Found {len(unique)} formats")
     return title, duration, unique
 
 def download_video(url, format_id, output_path):
@@ -89,6 +111,7 @@ def download_video(url, format_id, output_path):
            "--merge-output-format", "mp4", "-o", output_path, url]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        logger.error(f"Download stderr: {result.stderr}")
         raise Exception("Download failed")
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         raise Exception("Downloaded file empty")
@@ -97,9 +120,12 @@ def download_video(url, format_id, output_path):
 def split_and_send(file_path, base_name):
     file_size = os.path.getsize(file_path)
     if file_size <= MAX_FILE_SIZE:
-        if not send_document(file_path):
-            send_video(file_path)
-        return
+        if send_document(file_path):
+            return
+        elif send_video(file_path):
+            return
+        else:
+            raise Exception("Failed to send file (both document and video methods).")
     os.makedirs(TEMP_DIR, exist_ok=True)
     ext = os.path.splitext(file_path)[1]
     base = os.path.basename(file_path).replace(ext, "")
@@ -112,7 +138,8 @@ def split_and_send(file_path, base_name):
         chunk = os.path.join(TEMP_DIR, f"{base}_part_{part:03d}{ext}")
         if not os.path.exists(chunk): break
         if not send_document(chunk):
-            send_video(chunk)
+            if not send_video(chunk):
+                raise Exception(f"Failed to send part {part}")
         os.remove(chunk)
         part += 1
         time.sleep(0.5)
@@ -132,7 +159,6 @@ def main():
                 return
             buttons, row = [], []
             for f in formats[:6]:
-                # URL-encode video URL and format ID to safely embed in callback data
                 cb = f"format|{quote(VIDEO_URL, safe='')}|{quote(f['format_id'], safe='')}"
                 row.append({"text": f["label"], "callback_data": cb})
                 if len(row) == 2:
