@@ -1,4 +1,4 @@
-// worker/src/worker.ts - Polling version with User-Agent and premium debug
+// worker/src/worker.ts - Polling version with enhanced logging and fixes
 import { Hono } from 'hono';
 
 export interface Env {
@@ -19,9 +19,9 @@ async function answerCallbackSafe(env: Env, callbackId: string, text?: string, s
       text,
       show_alert: showAlert
     });
-    console.log('answerCallbackQuery response:', result);
+    console.log('answerCallbackQuery response:', JSON.stringify(result));
   } catch (e) {
-    console.warn('answerCallbackQuery failed:', e);
+    console.error('answerCallbackQuery exception:', e);
   }
 }
 
@@ -33,13 +33,15 @@ async function callBaleApi(env: Env, method: string, body: any) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  return resp.json();
+  const data = await resp.json();
+  if (!resp.ok) {
+    console.error(`Bale API error (${method}):`, resp.status, data);
+  }
+  return data;
 }
 
 async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
-  if (!env.GITHUB_REPO || typeof env.GITHUB_REPO !== 'string') {
-    throw new Error('GITHUB_REPO is not defined');
-  }
+  if (!env.GITHUB_REPO) throw new Error('GITHUB_REPO not defined');
   const [owner, repo] = env.GITHUB_REPO.split('/');
   const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/bot.yml/dispatches`;
   const resp = await fetch(url, {
@@ -49,13 +51,13 @@ async function triggerWorkflow(env: Env, inputs: Record<string, string>) {
       'Accept': 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       'Content-Type': 'application/json',
-      'User-Agent': 'BaleYouTubeBot/1.0'   // <-- Required to avoid 403
+      'User-Agent': 'BaleYouTubeBot/1.0'
     },
     body: JSON.stringify({ ref: 'main', inputs })
   });
   if (!resp.ok) {
     const err = await resp.text();
-    console.error('Failed to trigger workflow:', resp.status, err);
+    console.error('GitHub workflow trigger failed:', resp.status, err);
     throw new Error(`GitHub API error: ${resp.status}`);
   }
   return true;
@@ -83,16 +85,14 @@ async function processUpdate(env: Env, update: any) {
     const chatId = cb.message?.chat?.id;
     const callbackId = cb.id;
 
-    console.log(`Callback data type: ${typeof cbData}, value: ${cbData}`);
-
     if (!chatId || !callbackId) {
       console.error('Invalid callback_query: missing chatId or callbackId', cb);
       return;
     }
 
     if (!cbData || typeof cbData !== 'string') {
-      console.warn('Callback query missing "data" field or not a string');
-      await answerCallbackSafe(env, callbackId, 'This button has no action.');
+      console.warn('Callback data missing or not string');
+      await answerCallbackSafe(env, callbackId, 'Invalid button.');
       return;
     }
 
@@ -123,19 +123,16 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
     } else if (cbData === 'check_premium') {
-      // --- Premium check with logging ---
-      console.log(`Checking premium for chat ${chatId}`);
+      console.log(`Premium check for chat ${chatId}`);
       if (!env.USER_PLANS) {
-        console.error('USER_PLANS KV binding is undefined!');
+        console.error('USER_PLANS binding missing');
         await answerCallbackSafe(env, callbackId, 'Service temporarily unavailable.', true);
         return;
       }
       const hasPremium = await env.USER_PLANS.get(`premium:${chatId}`);
-      console.log(`Premium status for ${chatId}: ${hasPremium}`);
-      await answerCallbackSafe(env, callbackId,
-        hasPremium === 'true' ? '✅ You have premium access.' : '❌ No premium subscription found.',
-        true
-      );
+      console.log(`Premium status: ${hasPremium}`);
+      const msg = hasPremium === 'true' ? '✅ You have premium access.' : '❌ No premium subscription found.';
+      await answerCallbackSafe(env, callbackId, msg, true);
     } else {
       await answerCallbackSafe(env, callbackId, 'Unknown action.');
     }
@@ -173,6 +170,15 @@ async function processUpdate(env: Env, update: any) {
       return;
     }
 
+    if (!env.BALE_PAYMENT_TOKEN) {
+      console.error('BALE_PAYMENT_TOKEN missing');
+      await callBaleApi(env, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Payment service not configured.'
+      });
+      return;
+    }
+
     const invoiceResp = await fetch('https://api.bale.ai/payment/v1/invoice', {
       method: 'POST',
       headers: {
@@ -186,13 +192,17 @@ async function processUpdate(env: Env, update: any) {
         payer_name: `TelegramUser${chatId}`,
       })
     });
+
     if (!invoiceResp.ok) {
+      const errText = await invoiceResp.text();
+      console.error('Bale invoice creation failed:', invoiceResp.status, errText);
       await callBaleApi(env, 'sendMessage', {
         chat_id: chatId,
-        text: '❌ Payment service unavailable. Please try later.'
+        text: `❌ Payment service error (${invoiceResp.status}). Please try later.`
       });
       return;
     }
+
     const invoiceData = await invoiceResp.json() as any;
     const paymentUrl = invoiceData.payment_url;
     const trackId = invoiceData.track_id;
@@ -242,25 +252,20 @@ async function processUpdate(env: Env, update: any) {
   });
 }
 
-// ---------- Polling Function (Cron Trigger) ----------
+// ---------- Polling Function ----------
 async function pollUpdates(env: Env) {
   if (!env.BOT_STATE) {
-    console.error('pollUpdates: BOT_STATE is undefined');
+    console.error('BOT_STATE undefined');
     return;
   }
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
 
   const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
-  const params = new URLSearchParams({
-    offset: offset.toString(),
-    timeout: '30'
-  });
+  const params = new URLSearchParams({ offset: offset.toString(), timeout: '30' });
 
   try {
-    const resp = await fetch(`${url}?${params}`, {
-      headers: { 'Content-Type': 'application/json' }
-    });
+    const resp = await fetch(`${url}?${params}`, { headers: { 'Content-Type': 'application/json' } });
     const data = await resp.json() as any;
 
     if (!data.ok) {
@@ -275,7 +280,7 @@ async function pollUpdates(env: Env) {
       try {
         await processUpdate(env, update);
       } catch (err) {
-        console.error('Error processing update:', err, 'Update:', JSON.stringify(update));
+        console.error('Error processing update:', err, JSON.stringify(update));
       }
     }
 
@@ -287,7 +292,7 @@ async function pollUpdates(env: Env) {
   }
 }
 
-// ---------- Payment Callback (HTTP) ----------
+// ---------- Payment Callback ----------
 app.get('/payment/callback', async (c) => {
   const env = c.env;
   const userId = c.req.query('user_id');
