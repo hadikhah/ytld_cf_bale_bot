@@ -39,11 +39,19 @@ jobs:
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-      - name: Restore YouTube cookies
+      - name: Restore YouTube cookies and validate
         env:
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}
-        run: echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
-
+        run: |
+          echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
+          echo "=== First 5 lines of cookies.txt ==="
+          head -n 5 cookies.txt
+          if ! grep -q "# Netscape HTTP Cookie File" cookies.txt; then
+            echo "::error::cookies.txt is not in Netscape format!"
+            exit 1
+          fi
+          echo "Cookies file looks valid."
+          
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
