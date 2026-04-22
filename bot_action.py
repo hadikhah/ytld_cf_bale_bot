@@ -28,7 +28,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 def send_message(text, reply_markup=None):
     url = f"{BASE_URL}/sendMessage"
@@ -93,21 +93,20 @@ def get_video_formats(url):
     title = data.get("title", "Unknown")
     duration = data.get("duration", 0)
     formats = []
-
+    
     for f in data.get("formats", []):
         if f.get("vcodec") == "none":
             continue
         height = f.get("height") or 0
         if height == 0:
             continue
-
+            
         size = f.get("filesize") or f.get("filesize_approx") or 0
-
         vcodec = f.get("vcodec", "").split(".")[0]
         format_note = f.get("format_note", "")
         tbr = f.get("tbr")
         label = f"{height}p"
-
+        
         if format_note and format_note != str(height):
             label += f" {format_note}"
         if vcodec and vcodec not in label:
@@ -116,25 +115,25 @@ def get_video_formats(url):
             label += f" ~{tbr:.0f}kbps"
         elif size:
             label += f" ~{size//1024//1024} MB"
-
+            
         formats.append({
-            "format_id": f["format_id"],
-            "label": label,
+            "format_id": f["format_id"], 
+            "label": label, 
             "height": height,
             "size": size
         })
-
+        
     seen_keys = set()
     unique = []
     for f in formats:
         # Group duplicates by resolution and approx megabyte size
         size_mb = f["size"] // 1024 // 1024
         unique_key = f"{f['height']}_{size_mb}"
-
+        
         if unique_key not in seen_keys:
             seen_keys.add(unique_key)
             unique.append(f)
-
+            
     unique.sort(key=lambda x: -x["height"])
     logger.info(f"Found {len(unique)} formats")
     return title, duration, unique
@@ -166,20 +165,20 @@ def split_and_send(file_path, base_name):
         raise Exception("Failed to send the complete file.")
 
     logger.info("File exceeds max size, creating multi-part zip archive...")
-
+    
     file_dir = os.path.dirname(file_path) or "."
     file_name = os.path.basename(file_path)
     zip_base_name = f"{base_name}.zip"
-
+    
     chunk_size_mb = MAX_FILE_SIZE // (1024 * 1024)
-
+    
     # Run 'zip' from inside the target directory so internal paths stay flat
     cmd = [
         "zip", "-s", f"{chunk_size_mb}m",
         zip_base_name,
         file_name
     ]
-
+    
     logger.info(f"Running command: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=file_dir, capture_output=True, text=True)
     if result.returncode != 0:
@@ -191,7 +190,7 @@ def split_and_send(file_path, base_name):
     for f in os.listdir(file_dir):
         if f.startswith(base_name) and (f.endswith('.zip') or re.search(r'\.z\d+$', f)):
             split_files.append(os.path.join(file_dir, f))
-
+            
     # Sort them accurately so .z01 comes first, and the main .zip comes last
     def sort_parts(filepath):
         ext = os.path.splitext(filepath)[1].lower()
@@ -203,17 +202,16 @@ def split_and_send(file_path, base_name):
             return 0
 
     split_files.sort(key=sort_parts)
-
+    
     for part_num, chunk in enumerate(split_files, 1):
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending zip part {part_num}/{len(split_files)}: {os.path.basename(chunk)} ({chunk_size//1024//1024} MB)")
-
+        
         if not send_document(chunk):
             raise Exception(f"Failed to send zip part {part_num}")
-
+            
         os.remove(chunk)
         time.sleep(1)
-
 
 def cleanup():
     if os.path.exists(TEMP_DIR):
@@ -240,7 +238,7 @@ def main():
                 buttons.append(row)
             dur_str = f"{duration//60}:{duration%60:02d}" if duration else "unknown"
             send_message(f"🎥 *{title}*\n⏱️ {dur_str}\n\nSelect quality:", {"inline_keyboard": buttons})
-
+            
         elif ACTION == "download":
             if not FORMAT_ID:
                 raise ValueError("Missing format_id")
@@ -249,18 +247,18 @@ def main():
             video_id = video_id.group(1) if video_id else "video"
             out_file = os.path.join(TEMP_DIR, f"{video_id}_{FORMAT_ID}.mp4")
             os.makedirs(TEMP_DIR, exist_ok=True)
-
+            
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
-
+            
             send_message(f"📤 Uploading file ({file_size//1024//1024} MB) as a multi-part zip...")
             split_and_send(out_file, f"{video_id}_{FORMAT_ID}")
             send_message("✅ Download complete! Make sure to download all parts to the same folder and extract the final .zip file.")
-
+            
             if os.path.exists(out_file):
                 os.remove(out_file)
             cleanup()
-
+            
     except Exception as e:
         logger.exception("Action failed")
         send_message(f"⚠️ Error: {str(e)[:200]}")
@@ -270,5 +268,5 @@ def main():
             os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
         raise
 
-if name == "main":
+if __name__ == "__main__":
     main()
