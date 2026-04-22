@@ -73,8 +73,16 @@ jobs:
 
       - name: Restore YouTube cookies
         env:
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}
-        run: echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES }}  
+        run: |
+          echo "$YOUTUBE_COOKIES_B64" | base64 -d > cookies.txt
+          echo "=== First 5 lines of cookies.txt ==="
+          head -n 5 cookies.txt
+          if ! grep -q "# Netscape HTTP Cookie File" cookies.txt; then
+            echo "::error::cookies.txt is not in Netscape format!"
+            exit 1
+          fi
+          echo "Cookies file looks valid."
 
       - name: Run bot task
         env:
