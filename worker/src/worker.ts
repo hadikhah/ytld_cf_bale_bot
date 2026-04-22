@@ -16,7 +16,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 async function answerCallbackSafe(env: Env, callbackId: string, text?: string, showAlert = false) {
   try {
-    const result = await callBaleApi(env, 'answerCallbackQuery', {
+    await callBaleApi(env, 'answerCallbackQuery', {
       callback_query_id: callbackId,
       text,
       show_alert: showAlert
@@ -167,6 +167,20 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
+  // Restored /status command
+  if (text === '/status') {
+    const isPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
+    const expiry = await env.USER_PLANS.get(`expiry:${chatId}`);
+    let msg = isPremium ? '✅ You have premium access.' : '❌ No premium subscription.';
+    
+    if (expiry) {
+      msg += `\nExpires: ${new Date(parseInt(expiry) * 1000).toLocaleString()}`;
+    }
+    
+    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: msg });
+    return;
+  }
+
   const videoId = extractYouTubeId(text);
   if (videoId) {
     if (!(await hasAccess(env, chatId))) {
@@ -183,17 +197,24 @@ async function processUpdate(env: Env, update: any) {
   }
 }
 
-// Payment Handler
+// Payment Handler with Expiry logic restored
 async function handlePaymentUpdate(env: Env, update: any) {
   if (update.pre_checkout_query) {
     await callBaleApi(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
   }
+  
   if (update.message?.successful_payment) {
     const payload = update.message.successful_payment.invoice_payload;
     if (payload?.startsWith('premium_')) {
       const userId = payload.replace('premium_', '');
+      
+      // Calculate 30 days from now in seconds
+      const expiry = Math.floor(Date.now() / 1000) + 30 * 86400; 
+      
       await env.USER_PLANS.put(`premium:${userId}`, 'true');
-      await callBaleApi(env, 'sendMessage', { chat_id: parseInt(userId), text: '✅ Payment successful! Premium is active.' });
+      await env.USER_PLANS.put(`expiry:${userId}`, expiry.toString());
+      
+      await callBaleApi(env, 'sendMessage', { chat_id: parseInt(userId), text: '✅ Payment successful! Your premium subscription is now active for 30 days.' });
     }
   }
 }
