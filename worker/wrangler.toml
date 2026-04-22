@@ -3,9 +3,10 @@ main = "src/worker.ts"
 compatibility_date = "2025-01-01"
 
 # Bind KV namespaces – create these in Cloudflare dashboard first
+# and set the secrets in repository secrets (will be replaced during deploy)
 kv_namespaces = [
-  { binding = "BOT_STATE", id = "c14bfe9bf90146208b85e9bd165685c8" },
-  { binding = "USER_PLANS", id = "d644e50e83a04540884bf97745e8bcce" }
+  { binding = "BOT_STATE", id = "__BOT_STATE_KV_ID__" },
+  { binding = "USER_PLANS", id = "__USER_PLANS_KV_ID__" }
 ]
 
 [observability]
