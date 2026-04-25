@@ -109,7 +109,18 @@ def get_video_formats(url):
     title = data.get("title", "Unknown")
     duration = data.get("duration", 0)
     formats = []
-    
+
+    # Map heights to short resolution names
+    resolution_map = {
+        2160: "4K",
+        1440: "QHD",
+        1080: "FHD",
+        720: "HD",
+        480: "SD",
+        360: "LD",
+        240: "240p",
+    }
+
     for f in data.get("formats", []):
         if f.get("vcodec") == "none":
             continue
@@ -121,17 +132,41 @@ def get_video_formats(url):
         vcodec = f.get("vcodec", "").split(".")[0]
         format_note = f.get("format_note", "")
         tbr = f.get("tbr")
-        label = f"{height}p"
         
-        if format_note and format_note != str(height):
-            label += f" {format_note}"
+        # Resolution label
+        res_label = resolution_map.get(height, f"{height}p")
+        
+        # Strip redundant height part from format_note
+        stripped_note = ""
+        if format_note:
+            stripped_note = re.sub(
+                rf'^{re.escape(f"{height}p")}\s*', '', format_note, count=1
+            ).strip()
+        
+        # Estimate total download size
+        if tbr and duration > 0:
+            total_bytes = tbr * 1000 * duration / 8
+            size_mb = total_bytes / (1024 * 1024)
+        elif size > 0:
+            size_mb = size / (1024 * 1024)
+        else:
+            size_mb = 0
+
+        if size_mb >= 1024:
+            size_label = f"{size_mb/1024:.1f} GB"
+        elif size_mb > 0:
+            size_label = f"{size_mb:.0f} MB"
+        else:
+            size_label = "? MB"
+        
+        # Build final label
+        label = res_label
+        if stripped_note:
+            label += f" {stripped_note}"
         if vcodec and vcodec not in label:
             label += f" ({vcodec})"
-        if tbr:
-            label += f" ~{tbr:.0f}kbps"
-        elif size:
-            label += f" ~{size//1024//1024} MB"
-            
+        label += f" - {size_label}"
+        
         formats.append({
             "format_id": f["format_id"], 
             "label": label, 
@@ -243,7 +278,8 @@ def main():
                 send_message("❌ No downloadable formats found.")
                 return
             buttons, row = [], []
-            for f in formats[:6]:
+            # Show ALL formats now (previously limited to 6)
+            for f in formats:
                 cb = f"format|{quote(VIDEO_URL, safe='')}|{quote(f['format_id'], safe='')}"
                 row.append({"text": f["label"], "callback_data": cb})
                 if len(row) == 2:
