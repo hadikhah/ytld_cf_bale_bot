@@ -35,8 +35,7 @@ export interface YtPage {
 }
 
 // ============================================
-//  fetchYtPage – handles both first page
-//  and continuation (pagination)
+//  fetchYtPage
 // ============================================
 export async function fetchYtPage(
   query: string,
@@ -50,8 +49,7 @@ export async function fetchYtPage(
   } else {
     const params = new URLSearchParams({ search_query: query });
     if (filter === "date") {
-      // CAI= (which gets encoded to CAI%3D) sorts by upload date
-      params.set("sp", "CAI=");
+      params.set("sp", "CAI=");   // encode will turn '=' into %3D
     }
     url = `https://www.youtube.com/results?${params.toString()}`;
   }
@@ -64,7 +62,6 @@ export async function fetchYtPage(
   let data: any;
 
   if (continuationToken) {
-    // browse_ajax returns JSON (sometimes inside a <script>)
     try {
       data = JSON.parse(text);
     } catch {
@@ -76,7 +73,6 @@ export async function fetchYtPage(
       data = JSON.parse(jsonMatch[0]);
     }
   } else {
-    // Initial – extract ytInitialData
     const match = text.match(
       /var ytInitialData\s*=\s*(\{.*?\});\s*<\/script>/s
     );
@@ -87,7 +83,7 @@ export async function fetchYtPage(
     data = JSON.parse(match[1]);
   }
 
-  // ----- Navigate to the list of items -----
+  // ----- Extract items + continuation token -----
   let items: any[] = [];
   let nextToken: string | null = null;
 
@@ -97,38 +93,54 @@ export async function fetchYtPage(
       items = cont.contents ?? [];
       nextToken = cont.continuations?.[0]?.nextContinuationData?.continuation ?? null;
     } else {
-      // fallback
       items = data?.contents ?? [];
       nextToken = data?.continuations?.[0]?.nextContinuationData?.continuation ?? null;
     }
   } else {
-    // Initial search structure
     const primary =
       data?.contents?.twoColumnSearchResultsRenderer?.primaryContents;
-    const sectionList = primary?.sectionListRenderer?.contents?.[0];
-    const itemSection = sectionList?.itemSectionRenderer;
+    const sectionList = primary?.sectionListRenderer;
 
+    // 1) Check sectionList-level continuations (this is often where the token sits)
+    if (sectionList) {
+      nextToken =
+        sectionList.continuations?.[0]?.nextContinuationData?.continuation ?? null;
+    }
+
+    // 2) Dive into the first itemSection
+    const itemSection = sectionList?.contents?.[0]?.itemSectionRenderer;
     if (itemSection) {
-      items = itemSection.contents ?? [];
+      const itsItems = itemSection.contents ?? [];
+      items = itsItems;
 
-      // 1) Check top-level continuations of the itemSection
-      const topCont = itemSection.continuations?.[0]?.nextContinuationData?.continuation;
-      if (topCont) {
-        nextToken = topCont;
+      // 3) Check itemSection-level continuations (sometimes duplicative, but safe)
+      const localToken =
+        itemSection.continuations?.[0]?.nextContinuationData?.continuation;
+      if (localToken) nextToken = localToken;
+
+      // 4) Check last item for a continuationItemRenderer
+      if (!nextToken && items.length > 0) {
+        const last = items[items.length - 1];
+        const ctoken =
+          last?.continuationItemRenderer?.continuationEndpoint
+            ?.continuationCommand?.token;
+        if (ctoken) nextToken = ctoken;
       }
     }
 
-    // 2) Check the very last item (could be a continuationItemRenderer)
-    if (!nextToken && items.length > 0) {
-      const last = items[items.length - 1];
-      const ctoken =
-        last?.continuationItemRenderer?.continuationEndpoint
-          ?.continuationCommand?.token;
-      if (ctoken) nextToken = ctoken;
-    }
+    // DEBUG: log the keys that *could* hold the token
+    console.log(
+      "YT token debug:",
+      "sectionList.continuations:",
+      !!sectionList?.continuations,
+      "itemSection.continuations:",
+      !!itemSection?.continuations,
+      "last item type:",
+      items.length ? Object.keys(items[items.length - 1])[0] : "none"
+    );
   }
 
-  // ----- Extract video info (up to YT_MAX_RESULTS) -----
+  // ----- Build results -----
   const results: YtResult[] = [];
   for (const item of items) {
     const vr = item.videoRenderer;
@@ -175,7 +187,7 @@ export async function fetchYtPage(
 }
 
 // ============================================
-//  buildYtMessage – Markdown + inline keyboard
+//  buildYtMessage
 // ============================================
 export function buildYtMessage(page: YtPage): {
   text: string;
@@ -233,16 +245,16 @@ export async function searchYouTube(
 }
 
 // ============================================
-//  WEB SEARCH – DuckDuckGo + SearXNG rotation
+//  WEB SEARCH – DuckDuckGo Instant Answer + SearXNG
 // ============================================
 
-// Public SearXNG instances (no API key needed)
 const SEARX_INSTANCES = [
   "https://search.sapti.me",
   "https://searx.tiekoetter.com",
   "https://searx.be",
   "https://search.bus-hit.me",
   "https://searx.tux.computer",
+  "https://searx.fmac.xyz",
 ];
 
 async function trySearXNG(query: string): Promise<string | null> {
@@ -252,8 +264,17 @@ async function trySearXNG(query: string): Promise<string | null> {
       const resp = await fetch(url, {
         headers: { "User-Agent": YT_USER_AGENT },
       });
-      if (!resp.ok) continue;
-      const json = await resp.json();
+      if (!resp.ok) {
+        console.log(`SearXNG ${base} status ${resp.status}`);
+        continue;
+      }
+      // Some instances may return HTML error pages, so check content-type
+      const contentType = resp.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        console.log(`SearXNG ${base} non-JSON response`);
+        continue;
+      }
+      const json: any = await resp.json();
       const results = json.results ?? [];
       if (results.length > 0) {
         console.log(`SearXNG (${base}) found ${results.length} results`);
@@ -268,15 +289,45 @@ async function trySearXNG(query: string): Promise<string | null> {
         return output;
       }
     } catch (e) {
-      console.log(`SearXNG (${base}) error:`, e);
+      console.log(`SearXNG ${base} error:`, e);
     }
   }
   return null;
 }
 
-function parseDuckDuckGoResults(html: string): { title: string; url: string }[] {
+async function tryDuckDuckGoInstantAnswer(query: string): Promise<string | null> {
+  try {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+    const resp = await fetch(url, { headers: { "User-Agent": YT_USER_AGENT } });
+    if (!resp.ok) return null;
+    const json: any = await resp.json();
+    const related: any[] = json.RelatedTopics ?? [];
+    const results: { title: string; url: string }[] = [];
+    for (const topic of related) {
+      if (topic.FirstURL && topic.Text) {
+        // Text may contain HTML; strip it
+        const title = topic.Text.replace(/<[^>]+>/g, "").trim();
+        results.push({ title, url: topic.FirstURL });
+        if (results.length >= 5) break;
+      }
+    }
+    if (results.length > 0) {
+      console.log("DDG Instant Answer found", results.length, "related topics");
+      let output = "*Web results:*\n\n";
+      for (const r of results) {
+        output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
+      }
+      return output;
+    }
+  } catch (e) {
+    console.log("DDG Instant Answer error:", e);
+  }
+  return null;
+}
+
+function parseDuckDuckGoLiteHtml(html: string): { title: string; url: string }[] {
   const results: { title: string; url: string }[] = [];
-  // DuckDuckGo Lite pattern (class="result-link")
+  // Pattern for lite.duckduckgo.com
   const liteRegex = /<a[^>]*class="[^"]*result-link[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi;
   let match;
   while ((match = liteRegex.exec(html)) !== null) {
@@ -286,9 +337,8 @@ function parseDuckDuckGoResults(html: string): { title: string; url: string }[] 
     results.push({ title, url: link });
     if (results.length >= 5) break;
   }
-
   if (results.length === 0) {
-    // Old HTML pattern (class="result__a")
+    // Fallback class name (old HTML version)
     const oldRegex = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi;
     while ((match = oldRegex.exec(html)) !== null) {
       let link = match[1];
@@ -298,7 +348,6 @@ function parseDuckDuckGoResults(html: string): { title: string; url: string }[] 
       if (results.length >= 5) break;
     }
   }
-
   return results;
 }
 
@@ -310,10 +359,8 @@ export async function searchWeb(query: string): Promise<string> {
       headers: { "User-Agent": YT_USER_AGENT },
     });
     const html = await resp.text();
-    if (html.length < 100) {
-      console.log("Lite response too short:", html.slice(0, 200));
-    }
-    const results = parseDuckDuckGoResults(html);
+    console.log("DDG Lite snippet:", html.slice(0, 200));
+    const results = parseDuckDuckGoLiteHtml(html);
     if (results.length > 0) {
       console.log("DDG Lite found", results.length, "results");
       let output = "*Web results:*\n\n";
@@ -321,21 +368,24 @@ export async function searchWeb(query: string): Promise<string> {
         output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
       });
       return output;
-    } else {
-      console.log("DDG Lite 0 results – HTML snippet:", html.slice(0, 200));
     }
   } catch (e) {
-    console.log("DDG Lite fetch error:", e);
+    console.log("DDG Lite error:", e);
   }
 
-  // 2) DuckDuckGo HTML (old)
+  // 2) DuckDuckGo Instant Answer API
+  const instantResult = await tryDuckDuckGoInstantAnswer(query);
+  if (instantResult) return instantResult;
+
+  // 3) DuckDuckGo HTML (old)
   const htmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   try {
     const resp = await fetch(htmlUrl, {
       headers: { "User-Agent": YT_USER_AGENT },
     });
     const html = await resp.text();
-    const results = parseDuckDuckGoResults(html);
+    console.log("DDG HTML snippet:", html.slice(0, 200));
+    const results = parseDuckDuckGoLiteHtml(html);
     if (results.length > 0) {
       console.log("DDG HTML found", results.length, "results");
       let output = "*Web results:*\n\n";
@@ -343,14 +393,12 @@ export async function searchWeb(query: string): Promise<string> {
         output += `🌐 [${escapeMarkdown(r.title)}](${r.url})\n\n`;
       });
       return output;
-    } else {
-      console.log("DDG HTML 0 results – HTML snippet:", html.slice(0, 200));
     }
   } catch (e) {
-    console.log("DDG HTML fetch error:", e);
+    console.log("DDG HTML error:", e);
   }
 
-  // 3) SearXNG fallback (rotates instances)
+  // 4) SearXNG rotation
   const searxResult = await trySearXNG(query);
   if (searxResult) return searxResult;
 
