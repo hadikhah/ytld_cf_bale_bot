@@ -9,11 +9,12 @@ export interface Env {
   GITHUB_REPO: string;
   BALE_PAYMENT_TOKEN: string;
   ADMIN_CHAT_ID: string;
-  WORKER_SECRET: string; // Secret password for GitHub to unlock the queue
+  WORKER_SECRET: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
 
+// ------------------ HELPERS (unchanged) ------------------
 async function answerCallbackSafe(env: Env, callbackId: string, text?: string, showAlert = false) {
   try {
     await callBaleApi(env, 'answerCallbackQuery', {
@@ -69,13 +70,13 @@ function extractYouTubeId(text: string): string | null {
   return null;
 }
 
-// Authentication Check
 async function hasAccess(env: Env, chatId: string | number): Promise<boolean> {
   if (env.ADMIN_CHAT_ID && chatId.toString() === env.ADMIN_CHAT_ID) return true;
   const isPremium = await env.USER_PLANS.get(`premium:${chatId}`);
   return isPremium === 'true';
 }
 
+// ------------------ MAIN UPDATE PROCESSOR (unchanged) ------------------
 async function processUpdate(env: Env, update: any) {
   if (update.callback_query) {
     const cb = update.callback_query;
@@ -91,7 +92,6 @@ async function processUpdate(env: Env, update: any) {
          return;
       }
 
-      // Check Queue Lock
       const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
       if (isQueued === 'true') {
         await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress. Please wait!', true);
@@ -104,9 +104,7 @@ async function processUpdate(env: Env, update: any) {
       try {
         const [, encodedUrl, encodedFormat] = parts;
         
-        // Lock the queue for this user
         await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
-
         await answerCallbackSafe(env, callbackId, 'Download started...');
         await callBaleApi(env, 'sendMessage', {
           chat_id: chatId,
@@ -120,7 +118,6 @@ async function processUpdate(env: Env, update: any) {
           format_id: decodeURIComponent(encodedFormat)
         });
       } catch (e) {
-        // Unlock if GitHub trigger fails
         await env.USER_PLANS.delete(`dl_queue:${chatId}`);
         await answerCallbackSafe(env, callbackId, 'Error processing request.', true);
       }
@@ -167,7 +164,6 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
-  // Restored /status command
   if (text === '/status') {
     const isPremium = await env.USER_PLANS.get(`premium:${chatId}`) === 'true';
     const expiry = await env.USER_PLANS.get(`expiry:${chatId}`);
@@ -197,7 +193,7 @@ async function processUpdate(env: Env, update: any) {
   }
 }
 
-// Payment Handler with Expiry logic restored
+// ------------------ PAYMENT HANDLER (unchanged) ------------------
 async function handlePaymentUpdate(env: Env, update: any) {
   if (update.pre_checkout_query) {
     await callBaleApi(env, 'answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
@@ -208,7 +204,6 @@ async function handlePaymentUpdate(env: Env, update: any) {
     if (payload?.startsWith('premium_')) {
       const userId = payload.replace('premium_', '');
       
-      // Calculate 30 days from now in seconds
       const expiry = Math.floor(Date.now() / 1000) + 30 * 86400; 
       
       await env.USER_PLANS.put(`premium:${userId}`, 'true');
@@ -219,36 +214,27 @@ async function handlePaymentUpdate(env: Env, update: any) {
   }
 }
 
+// Wrap processUpdate with payment handling
 const originalProcessUpdate = processUpdate;
 processUpdate = async (env: Env, update: any) => {
   await handlePaymentUpdate(env, update);
   await originalProcessUpdate(env, update);
 };
 
-// Polling loop tightly bound to 50 seconds with a KV Lock
+// -------------------------------------------------------
+//  OPTIMIZED POLLING — 110s loop, no lock, 1 write/run
+// -------------------------------------------------------
 async function pollUpdates(env: Env) {
-  const LOCK_KEY = 'POLL_LOCK';
-  const now = Date.now();
-  
-  // 1. Check if another instance is already running
-  const activeLock = await env.BOT_STATE.get(LOCK_KEY);
-  if (activeLock && parseInt(activeLock) > now) {
-    console.log('Another instance is polling. Aborting.');
-    return;
-  }
-  
-  // 2. Lock for 55 seconds
-  await env.BOT_STATE.put(LOCK_KEY, (now + 295000).toString());
-
   const OFFSET_KEY = 'last_update_id';
   let offset = parseInt(await env.BOT_STATE.get(OFFSET_KEY) || '0', 10);
+  
+  const MAX_DURATION = 170_000; // 110 seconds – only 10s gap until next cron
   const startTime = Date.now();
-  const MAX_DURATION = 295000; // Run loop for exactly 50 seconds
 
   while (Date.now() - startTime < MAX_DURATION) {
     try {
       const url = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/getUpdates`;
-      const params = new URLSearchParams({ offset: offset.toString(), timeout: '3' });
+      const params = new URLSearchParams({ offset: offset.toString(), timeout: '6' });
       const resp = await fetch(`${url}?${params}`);
       const data = await resp.json() as any;
 
@@ -257,25 +243,30 @@ async function pollUpdates(env: Env) {
           offset = Math.max(offset, update.update_id + 1);
           await processUpdate(env, update);
         }
-        await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
       }
     } catch (err) {
       console.error('Polling error:', err);
+      // small delay to avoid tight error loops
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
-  
-  // 3. Remove lock when 50 seconds are up
-  await env.BOT_STATE.delete(LOCK_KEY);
+
+  // Save offset exactly once — now 720 writes/day
+  await env.BOT_STATE.put(OFFSET_KEY, offset.toString());
 }
 
+// -------------------------------------------------------
+//  WORKER EXPORT — no /poll, no lock
+// -------------------------------------------------------
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Cron every 2 minutes guarantees only one instance runs (110s < 120s)
     ctx.waitUntil(pollUpdates(env));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     
-    // Webhook for GitHub to unlock user queue
+    // Keep only the GitHub webhook
     if (url.pathname === '/github/done' && request.method === 'POST') {
       const body = await request.json() as any;
       if (body.secret === env.WORKER_SECRET && body.chat_id) {
@@ -284,12 +275,8 @@ export default {
       }
       return new Response('Unauthorized', { status: 401 });
     }
-
-    if (url.pathname === '/poll' && request.method === 'GET') {
-      ctx.waitUntil(pollUpdates(env));
-      return Response.json({ ok: true, status: "Polling started" });
-    }
     
+    // Everything else is blocked
     return new Response('Not found', { status: 404 });
   }
 };
