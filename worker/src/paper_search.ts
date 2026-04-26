@@ -158,7 +158,7 @@ export function buildPaperMessage(
   if (startIndex > 0) {
     const prevStart = Math.max(startIndex - MAX_RESULTS_PER_PAGE, 0);
     navRow.push({
-      text: "⬅️ Previous",
+      text: "Previous ➡️",
       callback_data: `paper_prev|${encodeURIComponent(originalQuery)}|${prevStart}`,
     });
   }
@@ -167,7 +167,7 @@ export function buildPaperMessage(
   const nextStart = startIndex + papers.length;
   if (nextStart < totalResults) {
     navRow.push({
-      text: "Next ➡️",
+      text: "⬅️ Next",
       callback_data: `paper_next|${encodeURIComponent(originalQuery)}|${nextStart}`,
     });
   }
