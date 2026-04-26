@@ -43,7 +43,7 @@ async function callBaleApi(env: Env, method: string, body: any) {
 
 async function triggerWorkflow(
   env: Env, 
-  inputs: Record<string, string>
+  inputs: Record<string, string>,
   workflowFile = "bot.yml"   // <-- new parameter with default
 ) {
   if (!env.GITHUB_REPO) throw new Error('GITHUB_REPO not defined');
