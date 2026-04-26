@@ -243,8 +243,8 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-          // ---------- Paper pagination (Next page) ----------
-      if (cbData.startsWith("paper_next|")) {
+      // ---------- Paper pagination (Next / Previous) ----------
+      if (cbData.startsWith("paper_next|") || cbData.startsWith("paper_prev|")) {
         const parts = cbData.split("|");
         if (parts.length < 3) return;
         const query = decodeURIComponent(parts[1]);
@@ -253,9 +253,9 @@ async function processUpdate(env: Env, update: any) {
         const response = await searchPapers(query, start);
         const { text: msgText, keyboard } = buildPaperMessage(response, query);
 
-        await callBaleApi(env, "editMessageText", {
+        // Send as a **new** message (do not edit the original)
+        await callBaleApi(env, "sendMessage", {
           chat_id: chatId,
-          message_id: cb.message.message_id,
           text: msgText,
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: keyboard },
@@ -263,7 +263,6 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId);
         return;
       }
-      
         
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
@@ -280,13 +279,13 @@ async function processUpdate(env: Env, update: any) {
   const text = message.text.trim();
 
   if (text === '/start') {
-    const welcome = `🎬 *Welcome to your Search & Media Bot*\n\nHere is what I can do:\n\n` +
-      `📥 *YouTube Downloader*\nSend me any YouTube link directly and I'll fetch the available download qualities.\n\n` +
-      `📄 *Paper search & download scholarly* \nUse \`/paper <query>\` \n search for papers in scholarly platform and download them.\n\n` +
-      `🔍 *YouTube Search*\nUse \`/ysearch <query>\` to search for videos, or \`/ysearch_latest <query>\` to find the most recently uploaded content.\n\n` +
-      `🌐 *Web Search*\nUse \`/search <query>\` to perform a secure, paginated web search.\n\n` +
-      `💎 *Premium Access*\nPremium users receive priority queue access. Use /buy to check options.`;
-
+    const welcome =
+      `🎬 *Welcome to your Search & Media Bot*\n\n` +
+      `• 📥 *YouTube Downloader* – Send a YouTube link to get download qualities.\n` +
+      `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
+      `• 🔍 *YouTube Search* – \`/ysearch <query>\` or \`/ysearch_latest <query>\` for newest videos.\n` +
+      `• 🌐 *Web Search* – \`/search <query>\` for web search.\n` +
+      `• 💎 *Premium* – Priority queue. Use /buy to upgrade.`;
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
       text: welcome,
