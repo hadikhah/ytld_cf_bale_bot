@@ -1,6 +1,6 @@
 // worker/src/worker.ts
 import { Hono } from 'hono';
-import { searchYouTube, searchWeb, buildYtMessage } from "./search";
+import { searchYouTube, searchWeb, buildYtMessage, buildWebMessage } from "./search";
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -87,6 +87,32 @@ async function processUpdate(env: Env, update: any) {
 
     if (!chatId || !callbackId) return;
 
+    // ---------- Web Search Pagination ----------
+    if (cbData.startsWith("web_next|")) {
+      const nextPage = parseInt(cbData.split("|")[1], 10);
+      const queryKey = `web_query:${chatId}`;
+      const originalQuery = await env.BOT_STATE.get(queryKey);
+
+      if (!originalQuery) {
+        await answerCallbackSafe(env, callbackId, "Search session expired.", true);
+        return;
+      }
+
+      await answerCallbackSafe(env, callbackId, "Loading page...");
+      const pageData = await searchWeb(originalQuery, nextPage);
+      const { text: messageText, keyboard } = buildWebMessage(pageData, nextPage);
+
+      await callBaleApi(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: cb.message.message_id,
+        text: messageText,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
     if (cbData.startsWith('format|')) {
       if (!(await hasAccess(env, chatId))) {
          await answerCallbackSafe(env, callbackId, '🔒 Only premium members can download.', true);
@@ -104,7 +130,6 @@ async function processUpdate(env: Env, update: any) {
       
       try {
         const [, encodedUrl, encodedFormat] = parts;
-        
         await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
         await answerCallbackSafe(env, callbackId, 'Download started...');
         await callBaleApi(env, 'sendMessage', {
@@ -136,38 +161,81 @@ async function processUpdate(env: Env, update: any) {
         return;
     }
 
-    // ---------- Handle "Thumbnail" button ----------
+    // ---------- Handle "Thumbnail" button (Smart Fallback) ----------
     if (cbData.startsWith("thumb|")) {
         const videoId = cbData.split("|")[1];
         const thumbUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
-        await callBaleApi(env, "sendPhoto", {
+        
+        await answerCallbackSafe(env, callbackId, "🖼️ Sending thumbnail...");
+
+        // Strategy 1: Let Bale fetch it directly (Fastest, but sometimes blocked)
+        const directUpload = await callBaleApi(env, "sendPhoto", {
           chat_id: chatId,
           photo: thumbUrl,
           caption: `Thumbnail for ${videoId}`,
         });
-        await answerCallbackSafe(env, callbackId, "🖼️ Thumbnail sent.");
+
+        // Strategy 2: If Bale fails (e.g., firewall block), fallback to CF proxy
+        if (!directUpload.ok) {
+          console.log("Direct thumb upload failed. Falling back to Worker proxy...");
+          try {
+            const imgResp = await fetch(thumbUrl);
+            if (!imgResp.ok) throw new Error("Thumb fetch failed on Worker");
+            const arrayBuffer = await imgResp.arrayBuffer();
+
+            const formData = new FormData();
+            formData.append("chat_id", chatId.toString());
+            formData.append("photo", new Blob([arrayBuffer], { type: "image/jpeg" }), "thumb.jpg");
+            formData.append("caption", `Thumbnail for ${videoId}`);
+
+            const uploadUrl = `https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendPhoto`;
+            const req = await fetch(uploadUrl, { method: "POST", body: formData });
+            const proxyData = await req.json();
+            
+            // If even the proxy upload fails, notify the user
+            if (!req.ok || !proxyData.ok) {
+              console.error("Worker proxy sendPhoto error:", proxyData);
+              await callBaleApi(env, "sendMessage", { 
+                chat_id: chatId, 
+                text: "⚠️ Bale's servers are currently experiencing issues receiving files. Please try again later." 
+              });
+            }
+          } catch (error) {
+            console.error("Thumb Worker proxy error:", error);
+            await callBaleApi(env, "sendMessage", { 
+              chat_id: chatId, 
+              text: "❌ Could not retrieve the thumbnail from YouTube." 
+            });
+          }
+        }
         return;
     }
 
     // ---------- Handle "Next page" button ----------
     if (cbData.startsWith("yt_next|")) {
-        const nextToken = cbData.substring(8);
+        const pageId = cbData.split("|")[1];
+        const nextToken = await env.BOT_STATE.get(`yt_page:${pageId}`);
         const queryKey = `yt_query:${chatId}`;
         const filterKey = `yt_filter:${chatId}`;
         const originalQuery = await env.BOT_STATE.get(queryKey);
         const originalFilter = (await env.BOT_STATE.get(filterKey)) as "relevance" | "date" | null;
 
-        if (!originalQuery) {
-          await answerCallbackSafe(env, callbackId, "Search session expired.", true);
+        if (!originalQuery || !nextToken) {
+          await answerCallbackSafe(env, callbackId, "Search session or page expired.", true);
           return;
         }
 
-        const page = await searchYouTube(
-          originalQuery,
-          originalFilter || "relevance",
-          nextToken
-        );
-        const { text: messageText, keyboard } = buildYtMessage(page);
+        await answerCallbackSafe(env, callbackId, "Loading next page...");
+
+        const page = await searchYouTube(originalQuery, originalFilter || "relevance", nextToken);
+        
+        let newPageId = "";
+        if (page.nextToken) {
+          newPageId = Math.random().toString(36).substring(2, 8);
+          await env.BOT_STATE.put(`yt_page:${newPageId}`, page.nextToken, { expirationTtl: 3600 });
+        }
+
+        const { text: messageText, keyboard } = buildYtMessage(page, newPageId);
 
         await callBaleApi(env, "editMessageText", {
           chat_id: chatId,
@@ -176,7 +244,6 @@ async function processUpdate(env: Env, update: any) {
           parse_mode: "Markdown",
           reply_markup: { inline_keyboard: keyboard },
         });
-        await answerCallbackSafe(env, callbackId);
         return;
     }
     else if (cbData === 'check_premium') {
@@ -193,8 +260,14 @@ async function processUpdate(env: Env, update: any) {
   const chatId = message.chat.id;
   const text = message.text.trim();
 
+  // ---------- New Start Command ----------
   if (text === '/start') {
-    const welcome = `🎬 *YouTube Downloader Bot*\n\nSend me a YouTube link and I'll fetch available qualities.\n\n💎 Premium users get higher priority.\nUse /buy to upgrade.`;
+    const welcome = `🎬 *Welcome to your Search & Media Bot*\n\nHere is what I can do:\n\n` +
+      `📥 *YouTube Downloader*\nSend me any YouTube link directly and I'll fetch the available download qualities.\n\n` +
+      `🔍 *YouTube Search*\nUse \`/ysearch <query>\` to search for videos, or \`/ysearch_latest <query>\` to find the most recently uploaded content.\n\n` +
+      `🌐 *Web Search*\nUse \`/search <query>\` to perform a secure, paginated web search.\n\n` +
+      `💎 *Premium Access*\nPremium users receive priority queue access. Use /buy to check options.`;
+
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
       text: welcome,
@@ -235,16 +308,21 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
-  // ---------- Web Search ----------
+  // ---------- Web Search Setup ----------
   if (text.startsWith("/search ")) {
     const query = text.slice(8).trim();
     if (query) {
-      const result = await searchWeb(query);
+      const pageData = await searchWeb(query, 1);
+      const { text: messageText, keyboard } = buildWebMessage(pageData, 1);
+
+      await env.BOT_STATE.put(`web_query:${chatId}`, query, { expirationTtl: 3600 });
+
       await callBaleApi(env, "sendMessage", {
         chat_id: chatId,
-        text: result,
+        text: messageText,
         parse_mode: "Markdown",
-        disable_web_page_preview: true
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: keyboard }
       });
     }
     return;
@@ -268,10 +346,18 @@ async function processUpdate(env: Env, update: any) {
     if (!query) return;
 
     const page = await searchYouTube(query, filter);
-    const { text: messageText, keyboard } = buildYtMessage(page);
+    
+    // Store token state
+    let pageId = "";
+    if (page.nextToken) {
+      pageId = Math.random().toString(36).substring(2, 8);
+      await env.BOT_STATE.put(`yt_page:${pageId}`, page.nextToken, { expirationTtl: 3600 });
+    }
 
-    await env.BOT_STATE.put(`yt_query:${chatId}`, query, { expirationTtl: 300 });
-    await env.BOT_STATE.put(`yt_filter:${chatId}`, filter, { expirationTtl: 300 });
+    const { text: messageText, keyboard } = buildYtMessage(page, pageId);
+
+    await env.BOT_STATE.put(`yt_query:${chatId}`, query, { expirationTtl: 3600 });
+    await env.BOT_STATE.put(`yt_filter:${chatId}`, filter, { expirationTtl: 3600 });
     
     await callBaleApi(env, "sendMessage", {
       chat_id: chatId,
@@ -281,7 +367,6 @@ async function processUpdate(env: Env, update: any) {
     });
     return;
   }
-
 
   const videoId = extractYouTubeId(text);
   if (videoId) {
