@@ -242,6 +242,28 @@ async function processUpdate(env: Env, update: any) {
         }
         return;
     }
+
+          // ---------- Paper pagination (Next page) ----------
+      if (cbData.startsWith("paper_next|")) {
+        const parts = cbData.split("|");
+        if (parts.length < 3) return;
+        const query = decodeURIComponent(parts[1]);
+        const start = parseInt(parts[2], 10);
+
+        const response = await searchPapers(query, start);
+        const { text: msgText, keyboard } = buildPaperMessage(response, query);
+
+        await callBaleApi(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: msgText,
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+      
         
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
