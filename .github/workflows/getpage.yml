@@ -25,68 +25,32 @@ jobs:
         run: npm install -g single-file-cli
 
 
-      - name: Capture page as single HTML (with stealth & fallback)
+      - name: Capture page as single HTML (with retry)
         env:
           PAGE_URL: ${{ inputs.page_url }}
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          send_message() {
-            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
-                 -H "Content-Type: application/json" \
-                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
-          }
-
-          # Stealth flags to reduce detection
-          STEALTH_ARGS=(
-            "--no-sandbox"
-            "--disable-setuid-sandbox"
-            "--disable-blink-features=AutomationControlled"
-            "--disable-features=IsolateOrigins,site-per-process"
-            "--disable-infobars"
-            "--window-size=1920,1080"
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-          )
-
-          # Build --browser-arg options dynamically
-          BROWSER_ARGS=""
-          for arg in "${STEALTH_ARGS[@]}"; do
-            BROWSER_ARGS="$BROWSER_ARGS --browser-arg=\"$arg\""
-          done
-
-          success=false
           for attempt in 1 2; do
             echo "Attempt $attempt..."
-            # shellcheck disable=SC2086
-            if single-file "$PAGE_URL" page.html \
-                 $BROWSER_ARGS \
-                 --browser-load-max-time=45000 \
-                 --browser-capture-max-time=45000 \
-                 --browser-wait-until="networkIdle"; then
-              echo "Capture succeeded"
-              success=true
-              break
-            fi
-            sleep 5
+            single-file "$PAGE_URL" page.html \
+              --browser-arg="--no-sandbox" \
+              --browser-arg="--disable-setuid-sandbox" \
+              --browser-load-max-time=45000 \
+              --browser-capture-max-time=45000 \
+              --browser-wait-until="networkIdle" && break
+            sleep 3
           done
 
-          if [ "$success" = true ] && [ -f page.html ]; then
-            echo "Self-contained HTML ready"
-          else
-            echo "❌ Full capture failed – trying simple text page as fallback"
-            # Fallback: just download the raw HTML (no assets)
-            curl -s -L -A "${STEALTH_ARGS[5]}" \
-                 --max-time 30 \
-                 -o raw_page.html "$PAGE_URL" || true
-
-            if [ -f raw_page.html ] && [ -s raw_page.html ]; then
-              mv raw_page.html page.html
-              send_message "⚠️ Could not capture the full page (bot protection). Here is a simplified text version – some elements may be missing."
-            else
-              send_message "❌ Sorry, this page could not be accessed at all. The site may be blocking automated requests."
-              exit 1
-            fi
+          if [ ! -f page.html ]; then
+            echo "❌ Capture failed after retries"
+            # Notify the user that it failed
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Sorry, the webpage could not be captured. The site might be too heavy or temporarily unavailable.\", \"parse_mode\": \"Markdown\"}"
+            exit 1
           fi
+
           
       - name: Zip and send
         env:
