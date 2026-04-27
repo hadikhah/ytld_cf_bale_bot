@@ -89,8 +89,8 @@ jobs:
                   } catch(e) {}
                 });
                 // Also include the base URL itself
-                urls.add(baseUrl.replace(/\/$/, ''));
-                return Array.from(urls).slice(0, 30);  // max 30 pages
+                urls.add(baseOrigin.replace(/\/$/, ''));
+                return Array.from(urls).slice(0, 30);
               }, origin);
 
               console.log(`Found ${links.length} pages to capture`);
