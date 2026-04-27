@@ -48,24 +48,23 @@ jobs:
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           puppeteer.use(StealthPlugin());
           const { execSync } = require('child_process');
-
+          
           (async () => {
             console.log('Launching stealth browser...');
             const browser = await puppeteer.launch({
               headless: 'new',
               args: ['--no-sandbox', '--disable-setuid-sandbox', '--remote-debugging-port=9222']
             });
-
+          
             console.log(`Pre-warming page: ${process.env.PAGE_URL}`);
             const page = await browser.newPage();
-
-            // Navigate and let page load (solves any challenges)
+          
             await page.goto(process.env.PAGE_URL, { waitUntil: 'networkidle2', timeout: 30000 })
               .catch(e => console.log('Navigation timeout (often ignorable)'));
-
+          
             try {
               console.log('Connecting SingleFile to stealth browser...');
-              execSync(`npx single-file "${process.env.PAGE_URL}" page.html --browser-debug-port=9222 --browser-wait-until="networkIdle" --browser-load-max-time=45000 --browser-capture-max-time=45000`, { stdio: 'inherit' });
+              execSync(`npx single-file "${process.env.PAGE_URL}" page.html --browser-remote-debugging-URL=http://127.0.0.1:9222 --browser-wait-until="networkIdle" --browser-load-max-time=45000 --browser-capture-max-time=45000`, { stdio: 'inherit' });
             } catch(e) {
               console.error('SingleFile failed, but page may still have been saved.');
             } finally {
@@ -73,7 +72,7 @@ jobs:
             }
           })();
           SCRIPT_END
-
+          
           node capture.js
 
           # If still no file, notify user
