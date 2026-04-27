@@ -1,0 +1,125 @@
+name: Webpage Download (Bash only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Bale chat ID'
+        required: true
+      page_url:
+        description: 'Page URL to download'
+        required: true
+      title:
+        description: 'Page title (for filename)'
+        default: 'webpage'
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Download webpage and assets
+        run: |
+          # Create a safe directory name
+          SAFE_TITLE=$(echo "${{ inputs.title }}" | tr -d '\\/*?:"<>|' | cut -c1-40)
+          mkdir -p "downloads/$SAFE_TITLE"
+          cd "downloads/$SAFE_TITLE"
+
+          # Mirror the page (wait 5 seconds, retry 2 times, reject dangerous extensions)
+          wget \
+            --mirror \
+            --page-requisites \
+            --adjust-extension \
+            --convert-links \
+            --wait=0.5 \
+            --timeout=10 \
+            --tries=2 \
+            --reject='*.exe,*.dll,*.bat,*.sh,*.cgi,*.php,*.py' \
+            --limit-rate=500k \
+            --no-verbose \
+            "${{ inputs.page_url }}" || true
+
+          # Zip the whole directory
+          cd ..
+          zip -r "${SAFE_TITLE}.zip" "$SAFE_TITLE"
+
+          # Move zip to workspace root for uploading
+          mv "${SAFE_TITLE}.zip" ../page.zip
+
+      - name: Send file with retry (same as paper)
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          TITLE: ${{ inputs.title }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: |
+          FILE_SIZE=$(stat -c%s page.zip)
+          MAX_SIZE=$((20 * 1024 * 1024))
+          SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-45)
+
+          send_message() {
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"$1\", \"parse_mode\": \"Markdown\"}"
+          }
+
+          try_upload() {
+            local file="$1"
+            local caption="$2"
+            for attempt in 1 2; do
+              if [ -n "$caption" ]; then
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           -F "caption=$caption" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              else
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
+                           "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
+              fi
+              HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
+              BODY=$(echo "$RESPONSE" | head -c -4)
+
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
+                echo "Upload succeeded on attempt $attempt"
+                return 0
+              fi
+              if [ $attempt -lt 2 ]; then sleep 1; fi
+            done
+            return 1
+          }
+
+          if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
+            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – direct send"
+            if try_upload "page.zip" "$SAFE_TITLE"; then
+              echo "Sent"
+            else
+              send_message "❌ Bale is currently unstable – unable to send file. Try again later."
+              exit 0
+            fi
+          else
+            echo "File too large – splitting"
+            zip -s 15m page.zip page.zip  # creates page.z01, page.z02... page.zip
+            PARTS=$(ls page.z* page.zip 2>/dev/null | sort -V)
+            for part in $PARTS; do
+              if ! try_upload "$part"; then
+                send_message "❌ Bale interrupted – partial delivery failed."
+                exit 0
+              fi
+              sleep 1
+            done
+            send_message "✅ Webpage sent in multiple parts.\n\n*How to open:*\n1. Download all parts into one folder.\n2. Extract ONLY the '.zip' file."
+          fi
+
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          if [ -n "$WORKER_URL" ] && [ -n "$WORKER_SECRET" ]; then
+            curl -s -X POST "$WORKER_URL/github/done" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
+          fi
