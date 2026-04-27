@@ -56,6 +56,14 @@ jobs:
           let basePath = new URL(baseUrl).pathname;
           if (!basePath.endsWith('/')) basePath += '/';
 
+          const MAX_TIME_MS = 100_000;   // 100 seconds
+          const startTime = Date.now();
+          let stoppedEarly = false;
+
+          function timeOver() {
+            return (Date.now() - startTime) >= MAX_TIME_MS;
+          }
+
           function safeName(url) {
             return url
               .replace(/^https?:\/\//, '')
@@ -78,7 +86,6 @@ jobs:
                   urls.add(clean);
                 } catch(e) {}
               });
-              // Add the starting page itself (cleaned)
               urls.add(origin + pathPrefix.replace(/\/$/, ''));
               return Array.from(urls).slice(0, 30);
             }, { origin, pathPrefix });
@@ -98,9 +105,7 @@ jobs:
 
               let links = await collectLinks(page, baseOrigin, basePath);
 
-              // If we got very few links, try the first internal page to get full nav
               if (links.length <= 2) {
-                // Find the first link that is NOT the exact base page
                 const altLink = links.find(l => l !== baseUrl.replace(/\/$/, ''));
                 if (altLink) {
                   console.log(`Too few links – jumping to ${altLink} for navigation`);
@@ -114,6 +119,12 @@ jobs:
 
               let captured = 0;
               for (const url of links) {
+                if (timeOver()) {
+                  stoppedEarly = true;
+                  console.log('Time limit reached – stopping capture.');
+                  break;
+                }
+
                 const filename = safeName(url);
                 const outputPath = path.join('output', filename);
 
@@ -152,6 +163,9 @@ jobs:
             indexHtml += '</ul></body></html>';
             fs.writeFileSync('output/index.html', indexHtml);
             console.log(`Written index.html – total pages: ${files.length}`);
+            if (stoppedEarly) {
+              console.log('Note: capture was stopped early due to time limit.');
+            }
           }
 
           run().catch(e => {
@@ -160,12 +174,11 @@ jobs:
           });
           SCRIPT_END
 
-          timeout 100 node capture.js
+          # Run without external timeout – the script manages its own time limit
+          node capture.js
           EXIT_CODE=$?
           echo "Capture exited with code $EXIT_CODE"
-          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 124 ]; then
-            echo "Real failure, but we'll still try to zip anything captured"
-          fi
+          # 0 = success, anything else we still attempt zip
 
           
       - name: Zip and send to user
