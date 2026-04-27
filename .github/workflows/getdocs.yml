@@ -7,16 +7,19 @@ on:
         description: 'Bale chat ID'
         required: true
       docs_url:
-        description: 'Base URL of the docs'
+        description: 'URL of the docs (can be a leaf page)'
         required: true
       title:
         description: 'Site name (for zip filename)'
         default: 'docs'
+      capture_timeout_minutes:
+        description: 'Max capture time (minutes)'
+        default: '5'
 
 jobs:
   mirror-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10            # hard upper bound (capture + zip + upload)
 
     steps:
       - uses: actions/checkout@v4
@@ -36,12 +39,13 @@ jobs:
           npm init -y
           npm install puppeteer single-file-cli
 
-      - name: Discover pages and capture (2‑minute limit)
+      - name: Discover pages and capture (time‑limited)
         id: capture
         continue-on-error: true
         env:
           DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
+          CAPTURE_TIMEOUT_MINUTES: ${{ inputs.capture_timeout_minutes }}
         run: |
           mkdir -p output
 
@@ -51,12 +55,26 @@ jobs:
           const fs = require('fs');
           const path = require('path');
 
+          // ---- config ----
           const baseUrl = process.env.DOCS_URL;
-          const baseOrigin = new URL(baseUrl).origin;
-          let basePath = new URL(baseUrl).pathname;
+          const baseUrlObj = new URL(baseUrl);
+          const origin = baseUrlObj.origin;
+
+          // Decide the documentation root path
+          let basePath = baseUrlObj.pathname;
+          // If it looks like a leaf page (no trailing slash and last segment doesn't contain a dot),
+          // go up one directory to capture the whole section
+          if (!basePath.endsWith('/')) {
+              const parts = basePath.split('/');
+              const last = parts[parts.length - 1];
+              if (!last.includes('.')) {
+                  basePath = parts.slice(0, -1).join('/') + '/';
+              }
+          }
           if (!basePath.endsWith('/')) basePath += '/';
 
-          const MAX_TIME_MS = 100_000;   // 100 seconds
+          const timeoutMinutes = parseInt(process.env.CAPTURE_TIMEOUT_MINUTES || '5', 10);
+          const MAX_TIME_MS = timeoutMinutes * 60 * 1000;
           const startTime = Date.now();
           let stoppedEarly = false;
 
@@ -92,6 +110,9 @@ jobs:
           }
 
           async function run() {
+            console.log(`Documentation root: ${origin}${basePath}`);
+            console.log(`Time limit: ${timeoutMinutes} minute(s)`);
+
             console.log('Launching browser...');
             const browser = await puppeteer.launch({
               headless: 'new',
@@ -103,18 +124,19 @@ jobs:
               console.log(`Loading base page: ${baseUrl}`);
               await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-              let links = await collectLinks(page, baseOrigin, basePath);
+              let links = await collectLinks(page, origin, basePath);
 
+              // If too few links, try to find a child page that has the full navigation
               if (links.length <= 2) {
-                const altLink = links.find(l => l !== baseUrl.replace(/\/$/, ''));
+                const altLink = links.find(l => l !== origin + basePath.replace(/\/$/, ''));
                 if (altLink) {
                   console.log(`Too few links – jumping to ${altLink} for navigation`);
                   await page.goto(altLink, { waitUntil: 'networkidle2', timeout: 30000 });
-                  links = await collectLinks(page, baseOrigin, basePath);
+                  links = await collectLinks(page, origin, basePath);
                 }
               }
 
-              console.log(`Found ${links.length} pages under ${basePath}`);
+              console.log(`Found ${links.length} pages`);
               fs.writeFileSync('urls.txt', links.join('\n'));
 
               let captured = 0;
@@ -163,9 +185,7 @@ jobs:
             indexHtml += '</ul></body></html>';
             fs.writeFileSync('output/index.html', indexHtml);
             console.log(`Written index.html – total pages: ${files.length}`);
-            if (stoppedEarly) {
-              console.log('Note: capture was stopped early due to time limit.');
-            }
+            if (stoppedEarly) console.log('Capture stopped early due to time limit.');
           }
 
           run().catch(e => {
@@ -174,13 +194,11 @@ jobs:
           });
           SCRIPT_END
 
-          # Run without external timeout – the script manages its own time limit
           node capture.js
           EXIT_CODE=$?
           echo "Capture exited with code $EXIT_CODE"
-          # 0 = success, anything else we still attempt zip
+          # If it failed for a reason other than time limit, we'll still try to zip what we have.
 
-          
       - name: Zip and send to user
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
