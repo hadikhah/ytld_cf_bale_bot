@@ -1,4 +1,4 @@
-name: Webpage Download (Bash only)
+name: Webpage Download (Full MHTML)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: 'Page URL to download'
         required: true
       title:
-        description: 'Page title (for filename)'
+        description: 'Page title'
         default: 'webpage'
 
 jobs:
@@ -19,35 +19,35 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Download webpage and assets
+      - uses: actions/checkout@v4
+
+      - name: Cache Puppeteer
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('.github/workflows/getpage.yml') }}
+
+      - name: Setup Node & install Puppeteer
         run: |
-          # Create a safe directory name
-          SAFE_TITLE=$(echo "${{ inputs.title }}" | tr -d '\\/*?:"<>|' | cut -c1-40)
-          mkdir -p "downloads/$SAFE_TITLE"
-          cd "downloads/$SAFE_TITLE"
+          npm init -y
+          npm install puppeteer
 
-          # Mirror the page (wait 5 seconds, retry 2 times, reject dangerous extensions)
-          wget \
-            --mirror \
-            --page-requisites \
-            --adjust-extension \
-            --convert-links \
-            --wait=0.5 \
-            --timeout=10 \
-            --tries=2 \
-            --reject='*.exe,*.dll,*.bat,*.sh,*.cgi,*.php,*.py' \
-            --limit-rate=500k \
-            --no-verbose \
-            "${{ inputs.page_url }}" || true
+      - name: Download page as MHTML
+        run: node -e "
+          const puppeteer = require('puppeteer');
+          (async () => {
+            const browser = await puppeteer.launch();
+            const page = await browser.newPage();
+            const cdp = await page.target().createCDPSession();
+            const url = process.env.PAGE_URL;
+            await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+            const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
+            require('fs').writeFileSync('page.mhtml', data);
+            await browser.close();
+          })();
+        " --env PAGE_URL="${{ inputs.page_url }}"
 
-          # Zip the whole directory
-          cd ..
-          zip -r "${SAFE_TITLE}.zip" "$SAFE_TITLE"
-
-          # Move zip to workspace root for uploading
-          mv "${SAFE_TITLE}.zip" ../page.zip
-
-      - name: Send file with retry (same as paper)
+      - name: Zip & send (same as before, but only one file)
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
@@ -55,6 +55,8 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
         run: |
+          # Zip the .mhtml file (optional, but keeps consistent handling)
+          zip page.zip page.mhtml
           FILE_SIZE=$(stat -c%s page.zip)
           MAX_SIZE=$((20 * 1024 * 1024))
           SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-45)
@@ -66,12 +68,10 @@ jobs:
           }
 
           try_upload() {
-            local file="$1"
-            local caption="$2"
+            local file="$1"; local caption="$2"
             for attempt in 1 2; do
               if [ -n "$caption" ]; then
-                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
-                           -F "caption=$caption" \
+                RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" -F "caption=$caption" \
                            "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
               else
                 RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$file" \
@@ -79,36 +79,23 @@ jobs:
               fi
               HTTP_CODE=$(echo "$RESPONSE" | tail -c 4)
               BODY=$(echo "$RESPONSE" | head -c -4)
-
-              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then
-                echo "Upload succeeded on attempt $attempt"
-                return 0
-              fi
-              if [ $attempt -lt 2 ]; then sleep 1; fi
+              if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"ok":true'; then return 0; fi
+              [ $attempt -lt 2 ] && sleep 1
             done
             return 1
           }
 
           if [ "$FILE_SIZE" -le "$MAX_SIZE" ]; then
-            echo "File size $(($FILE_SIZE / 1024 / 1024)) MB – direct send"
+            echo "Sending MHTML zip (${FILE_SIZE} bytes)"
             if try_upload "page.zip" "$SAFE_TITLE"; then
               echo "Sent"
             else
-              send_message "❌ Bale is currently unstable – unable to send file. Try again later."
+              send_message "❌ Bale is unstable – unable to send file."
               exit 0
             fi
           else
-            echo "File too large – splitting"
-            zip -s 15m page.zip page.zip  # creates page.z01, page.z02... page.zip
-            PARTS=$(ls page.z* page.zip 2>/dev/null | sort -V)
-            for part in $PARTS; do
-              if ! try_upload "$part"; then
-                send_message "❌ Bale interrupted – partial delivery failed."
-                exit 0
-              fi
-              sleep 1
-            done
-            send_message "✅ Webpage sent in multiple parts.\n\n*How to open:*\n1. Download all parts into one folder.\n2. Extract ONLY the '.zip' file."
+            send_message "⚠️ The MHTML file is too large even after zipping. Please download it manually: ${{ inputs.page_url }}"
+            exit 0
           fi
 
       - name: Unlock worker queue
