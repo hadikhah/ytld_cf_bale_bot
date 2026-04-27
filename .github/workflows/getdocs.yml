@@ -7,7 +7,7 @@ on:
         description: 'Bale chat ID'
         required: true
       docs_url:
-        description: 'Base URL of the docs (e.g., https://filamentphp.com/docs/5.x/)'
+        description: 'Base URL of the docs'
         required: true
       title:
         description: 'Site name (for zip filename)'
@@ -16,12 +16,12 @@ on:
 jobs:
   mirror-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5            # short overall timeout – we kill wget earlier anyway
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mirror site with wget
+      - name: Mirror site with wget (time-limited)
         env:
           DOCS_URL: ${{ inputs.docs_url }}
           TITLE: ${{ inputs.title }}
@@ -30,21 +30,24 @@ jobs:
           mkdir -p "mirror/$SAFE_TITLE"
           cd "mirror/$SAFE_TITLE"
 
-          wget \
-            --mirror \
+          # Crawl only 2 levels deep, stay on the same domain, stop after 120 seconds
+          timeout 120 wget \
+            --recursive \
+            --level=2 \
+            --domains=$(echo "$DOCS_URL" | sed -E 's#^https?://([^/]+).*#\1#') \
             --page-requisites \
             --adjust-extension \
             --convert-links \
-            --span-hosts \
             --execute robots=off \
             --no-verbose \
-            --wait=0.5 \
-            --timeout=10 \
+            --wait=0.2 \
+            --random-wait \
             --tries=2 \
+            --timeout=10 \
             --reject='*.exe,*.dll,*.bat,*.sh,*.cgi,*.php,*.py' \
             --limit-rate=500k \
-            --directory-prefix=. \
-            "${{ inputs.docs_url }}" || true
+            "$DOCS_URL" || true
+          echo "wget finished (or was interrupted after 120s)"
 
       - name: Zip and send
         env:
@@ -57,9 +60,19 @@ jobs:
           SAFE_TITLE=$(echo "$TITLE" | tr -d '\\/*?:"<>|' | cut -c1-40)
           ZIP_NAME="${SAFE_TITLE}.zip"
 
-          cd mirror
-          zip -r "../${ZIP_NAME}" "$SAFE_TITLE"
-          cd ..
+          # Zip whatever we downloaded
+          if [ -d "mirror/$SAFE_TITLE" ] && [ -n "$(ls -A mirror/$SAFE_TITLE 2>/dev/null)" ]; then
+            cd mirror
+            zip -r "../${ZIP_NAME}" "$SAFE_TITLE"
+            cd ..
+          else
+            # No files – notify user
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Mirroring failed – nothing was downloaded.\", \"parse_mode\": \"Markdown\"}"
+            echo "No files to zip"
+            exit 0
+          fi
 
           ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
           MAX_SIZE=$((20 * 1024 * 1024))
@@ -90,14 +103,13 @@ jobs:
 
           if [ "$ZIP_SIZE" -le "$MAX_SIZE" ]; then
             if try_upload "$ZIP_NAME" "$ZIP_NAME"; then
-              send_message "✅ *Documentation mirrored:* \`$ZIP_NAME\`\n\n📱 Extract the zip and open any \`.html\` file – the whole site works offline."
+              send_message "✅ *Documentation mirrored (up to depth 2):* \`$ZIP_NAME\`\n\n📱 Extract and open any \`.html\` file to browse offline."
             else
-              send_message "❌ Bale is unstable – unable to send file. Please try again later."
+              send_message "❌ Bale is unstable – unable to send file."
               exit 0
             fi
           else
-            send_message "⚠️ The mirror is too large, splitting into parts..."
-            # Split the zip
+            send_message "⚠️ Mirror too large – splitting into parts..."
             rm "$ZIP_NAME"
             cd mirror
             zip -s 15m "../${ZIP_NAME}" "$SAFE_TITLE"
@@ -110,7 +122,7 @@ jobs:
               fi
               sleep 1
             done
-            send_message "✅ *Documentation mirrored (split archive):*\n\n📥 Download all parts, extract the \`.zip\` file, then open any HTML page to browse offline."
+            send_message "✅ *Documentation mirrored (split archive).* Extract and browse offline."
           fi
 
       - name: Unlock worker queue
