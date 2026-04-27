@@ -1,11 +1,12 @@
 // worker/src/weather.ts
 // ======================================
 //  Free weather forecast – Open‑Meteo
-//  (no API key required)
+//  (no API key, local‑time aligned)
 // ======================================
 
 const GEO_URL = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+const TIMEZONE_URL = "https://api.open-meteo.com/v1/timezone";
 const USER_AGENT = "Mozilla/5.0 (compatible; BaleWeatherBot/1.0)";
 
 const WEATHER_ICONS: Record<number, string> = {
@@ -64,47 +65,40 @@ async function geocode(city: string): Promise<{ lat: number; lon: number; name: 
   return { lat: r.latitude, lon: r.longitude, name: r.name };
 }
 
-// ---------- Forecast (raw data) ----------
-interface WeatherDataRaw {
-  time: string[];
-  temperature_2m: number[];
-  weathercode: number[];
+// ---------- Current local time ----------
+async function fetchLocalTime(lat: number, lon: number): Promise<{ time: string; timezone: string } | null> {
+  const url = `${TIMEZONE_URL}?latitude=${lat}&longitude=${lon}`;
+  const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+  if (!resp.ok) return null;
+  const data: any = await resp.json();
+  // data.time format: "2026-04-27T13:30:00+03:30"
+  // data.timezone: "Asia/Tehran"
+  return { time: data.time, timezone: data.timezone };
 }
 
-interface DailyDataRaw {
-  time: string[];
-  temperature_2m_max: number[];
-  temperature_2m_min: number[];
-  weathercode: number[];
-}
-
-interface ForecastRaw {
-  hourly: WeatherDataRaw;
-  daily: DailyDataRaw;
-}
-
-async function fetchForecast(lat: number, lon: number): Promise<ForecastRaw | null> {
+// ---------- Forecast ----------
+async function fetchForecast(lat: number, lon: number): Promise<any | null> {
   const params = new URLSearchParams({
     latitude: lat.toString(),
     longitude: lon.toString(),
     hourly: "temperature_2m,weathercode",
     daily: "temperature_2m_max,temperature_2m_min,weathercode",
-    timezone: "auto",   // all times in CITY LOCAL time
+    timezone: "auto",
     forecast_days: "7",
   });
   const url = `${FORECAST_URL}?${params.toString()}`;
   const resp = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
   if (!resp.ok) return null;
-  return resp.json() as Promise<ForecastRaw>;
+  return resp.json();
 }
 
-// ---------- Formatting ----------
+// ---------- Extract hour string from ISO-like time (no offset) ----------
 function extractHour(isoTime: string): string {
-  // isoTime = "2026-04-27T13:00" (local time)
+  // e.g., "2026-04-27T13:00"
   const parts = isoTime.split("T");
   if (parts.length < 2) return "";
   const timePart = parts[1]; // "13:00"
-  const hour = timePart.split(":")[0]; // "13"
+  const hour = timePart.split(":")[0];
   return hour.padStart(2, "0") + ":00";
 }
 
@@ -115,24 +109,49 @@ export async function getWeatherReport(city: string): Promise<string> {
   const forecast = await fetchForecast(geo.lat, geo.lon);
   if (!forecast) return "❌ Failed to fetch weather data. Please try again later.";
 
-  const { hourly, daily } = forecast;
-  let msg = `🌍 *Weather for ${escapeMarkdown(geo.name)}* (${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)})\n\n`;
+  const localTime = await fetchLocalTime(geo.lat, geo.lon);
+  if (!localTime) return "❌ Could not determine local time for this location.";
 
-  // Hourly – next 24 hours (just take first 24 entries)
-  const hLen = Math.min(hourly.time.length, 24);
+  // current local time string with offset, e.g., "2026-04-27T13:35:00+03:30"
+  // We strip the offset to match the forecast strings (which are in local time but without offset)
+  const currentIso = localTime.time.replace(/[+-]\d{2}:\d{2}$/, "").replace(/:\d{2}\.\d+Z?$/, "");
+  // Now "2026-04-27T13:35:00" or similar
+  const currentHourPrefix = currentIso.substring(0, 13); // "2026-04-27T13"
+  const currentHourFull = currentIso.substring(0, 16); // "2026-04-27T13:35" (not needed)
+
+  const { hourly, daily } = forecast;
+  const times = hourly.time as string[];
+
+  // Find first index where hour >= current hour
+  let startIndex = 0;
+  for (let i = 0; i < times.length; i++) {
+    const entry = times[i].substring(0, 13); // "2026-04-27T13"
+    if (entry >= currentHourPrefix) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  const next24 = times.slice(startIndex, startIndex + 24);
+  const temps = hourly.temperature_2m.slice(startIndex, startIndex + 24);
+  const codes = hourly.weathercode.slice(startIndex, startIndex + 24);
+
+  let msg = `🌍 *Weather for ${escapeMarkdown(geo.name)}* (${geo.lat.toFixed(2)}, ${geo.lon.toFixed(2)})\n`;
+  msg += `🕒 Local time: ${localTime.timezone}\n\n`;
+
   msg += "🕐 *Hourly (next 24 h):*\n";
-  for (let i = 0; i < hLen; i++) {
-    const hour = extractHour(hourly.time[i]);
-    const temp = hourly.temperature_2m[i].toFixed(1);
-    const icon = weatherIcon(hourly.weathercode[i]);
+  for (let i = 0; i < next24.length; i++) {
+    const hour = extractHour(next24[i]);
+    const temp = temps[i].toFixed(1);
+    const icon = weatherIcon(codes[i]);
     msg += `┃ ${hour}  ${temp}°C  ${icon}\n`;
   }
 
-  // Daily – 7‑day forecast
-  const dLen = Math.min(daily.time.length, 7);
+  // Daily – 7‑day
   msg += "\n📅 *Daily (7‑day forecast):*\n";
+  const dLen = Math.min(daily.time.length, 7);
   for (let i = 0; i < dLen; i++) {
-    const date = new Date(daily.time[i] + "T00:00"); // safe, no time issues for date display
+    const date = new Date(daily.time[i] + "T00:00");
     const dayName = date.toLocaleDateString("en-US", { weekday: "short" });
     const monthDay = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     const max = daily.temperature_2m_max[i].toFixed(1);
