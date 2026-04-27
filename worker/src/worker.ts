@@ -265,6 +265,27 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId);
         return;
       }
+
+              // ---------- Weather pagination ----------
+      if (cbData.startsWith("weather|")) {
+        const [, cityEnc, offsetStr] = cbData.split("|");
+        const city = decodeURIComponent(cityEnc);
+        const offset = parseInt(offsetStr, 10);
+        const result = await getWeatherReport(city, offset);
+        if (!result) {
+          await answerCallbackSafe(env, callbackId, "Weather data expired.", true);
+          return;
+        }
+        await callBaleApi(env, "editMessageText", {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: result.text,
+          parse_mode: "Markdown",
+          reply_markup: result.keyboard.length ? { inline_keyboard: result.keyboard } : undefined,
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
         
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
@@ -390,19 +411,23 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
-    // ---------- Weather forecast ----------
+  // ---------- Weather ----------
   if (text.startsWith("/weather ")) {
     const city = text.slice(9).trim();
     if (!city) return;
-    const report = await getWeatherReport(city);
+    const result = await getWeatherReport(city, 0);
+    if (!result) {
+      await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "❌ Could not fetch weather." });
+      return;
+    }
     await callBaleApi(env, "sendMessage", {
       chat_id: chatId,
-      text: report,
+      text: result.text,
       parse_mode: "Markdown",
+      reply_markup: result.keyboard.length ? { inline_keyboard: result.keyboard } : undefined,
     });
     return;
   }
-
   
   const videoId = extractYouTubeId(text);
   if (videoId) {
