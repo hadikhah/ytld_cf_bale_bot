@@ -308,6 +308,7 @@ async function processUpdate(env: Env, update: any) {
       `• 🔍 *YouTube Search* – \`/ysearch <query>\` or \`/ysearch_latest <query>\` for newest videos.\n` +
       `• 📄 *Paper Search* – \`/paper <query>\` searches arXiv and lets you download PDFs.\n` +
       `• 🌦️ *Weather* – \`/weather <city>\` for hourly + 7‑day forecast.\n`+
+      `• 📦 *Webpage Saver* – \`/getpage <url>\` downloads the full page as a ZIP.\n`+
       `• 🌐 *Web Search* – \`/search <query>\` for web search.\n` +
       `• 💎 *Premium* – Priority queue. Use /buy to upgrade.`;
     await callBaleApi(env, 'sendMessage', {
@@ -426,6 +427,46 @@ async function processUpdate(env: Env, update: any) {
       parse_mode: "Markdown",
       reply_markup: result.keyboard.length ? { inline_keyboard: result.keyboard } : undefined,
     });
+    return;
+  }
+
+    // ---------- Webpage download ----------
+  if (text.startsWith("/getpage ")) {
+    const url = text.slice(9).trim();
+    if (!url) return;
+
+    // Basic URL validation
+    if (!/^https?:\/\/.+\..+/.test(url)) {
+      await callBaleApi(env, "sendMessage", { chat_id: chatId, text: "❌ Invalid URL." });
+      return;
+    }
+
+    // Check queue (reuse dl_queue)
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === "true") {
+      await callBaleApi(env, "sendMessage", {
+        chat_id: chatId,
+        text: "⚠️ You already have a download in progress. Please wait.",
+      });
+      return;
+    }
+
+    await env.USER_PLANS.put(`dl_queue:${chatId}`, "true");
+    await callBaleApi(env, "sendMessage", {
+      chat_id: chatId,
+      text: `⏳ Downloading webpage: \`${url}\`\nYou’ll receive a ZIP once ready.`,
+      parse_mode: "Markdown",
+    });
+
+    await triggerWorkflow(
+      env,
+      {
+        chat_id: chatId.toString(),
+        page_url: url,
+        title: "Webpage",  // you could extract title later, but this is fine
+      },
+      "getpage.yml"
+    );
     return;
   }
   
