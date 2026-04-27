@@ -21,12 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache SingleFile browser
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/single-file-cli
-          key: singlefile-${{ runner.os }}-${{ hashFiles('.github/workflows/getpage.yml') }}
-
       - name: Install SingleFile CLI
         run: npm install -g single-file-cli
 
@@ -36,6 +30,7 @@ jobs:
         run: |
           single-file "$PAGE_URL" \
             --output=page.html \
+            --browser-args="--no-sandbox --disable-setuid-sandbox" \
             --browser-max-timeout=45000
 
       - name: Zip and send
@@ -97,7 +92,6 @@ jobs:
             fi
           else
             echo "Zip too large – splitting"
-            # Create split zip from safe_name.zip
             zip -s 15m "${SAFE_NAME}.zip" "${SAFE_NAME}.html"
             PARTS=$(ls "${SAFE_NAME}.z"* "${SAFE_NAME}.zip" 2>/dev/null | sort -V)
             for part in $PARTS; do
