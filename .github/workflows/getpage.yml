@@ -25,24 +25,31 @@ jobs:
         run: npm install -g single-file-cli
 
 
-      - name: Capture page as single HTML
+      - name: Capture page as single HTML (with retry)
         env:
           PAGE_URL: ${{ inputs.page_url }}
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          echo "Capturing page with SingleFile..."
-          single-file "$PAGE_URL" page.html \
-            --browser-arg="--no-sandbox" \
-            --browser-arg="--disable-setuid-sandbox" \
-            --browser-load-max-time=45000 \
-            --browser-capture-max-time=45000 \
-            --browser-wait-until="networkIdle"
+          for attempt in 1 2; do
+            echo "Attempt $attempt..."
+            single-file "$PAGE_URL" page.html \
+              --browser-arg="--no-sandbox" \
+              --browser-arg="--disable-setuid-sandbox" \
+              --browser-load-max-time=45000 \
+              --browser-capture-max-time=45000 \
+              --browser-wait-until="networkIdle" && break
+            sleep 3
+          done
 
           if [ ! -f page.html ]; then
-            echo " Error: page.html was not created"
+            echo "❌ Capture failed after retries"
+            # Notify the user that it failed
+            curl -s -X POST "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendMessage" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"❌ Sorry, the webpage could not be captured. The site might be too heavy or temporarily unavailable.\", \"parse_mode\": \"Markdown\"}"
             exit 1
           fi
-          echo "Capture successful, file size: $(stat -c%s page.html) bytes"
-
           
       - name: Zip and send
         env:
