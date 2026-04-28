@@ -1,4 +1,4 @@
-name: Test S3 Pre-signed URL (ArvanCloud)
+name: Test S3 Pre-signed URL (Self-Test + Artifact)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   test-presigned:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5   # plenty of time for the file to live
 
     steps:
       - name: Install AWS CLI via pip
@@ -32,34 +32,51 @@ jobs:
           EOF
           echo "S3_ENDPOINT=${S3_ENDPOINT}" >> $GITHUB_ENV
 
-      - name: Create test file and upload
+      - name: Upload test file
         env:
           BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
         run: |
           echo "Test file content – $(date)" > test-file.txt
           aws s3 cp test-file.txt s3://${BUCKET_NAME}/test-file.txt --endpoint-url $S3_ENDPOINT
-          echo "✅ Uploaded test file"
+          echo "✅ Uploaded"
 
-      - name: Generate pre-signed URL (2 minutes)
+      - name: Generate presigned URL, validate, and save to file
         env:
           BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
         run: |
+          echo "Generating presigned URL (2 minute expiry)..."
           PRESIGNED_URL=$(aws s3 presign s3://${BUCKET_NAME}/test-file.txt \
             --endpoint-url $S3_ENDPOINT \
             --expires-in 120)
-          echo "=============================================="
-          echo "🔗 Pre-signed URL (valid 2 minutes):"
-          echo "$PRESIGNED_URL"
-          echo "=============================================="
-          echo "PRESIGNED_URL=$PRESIGNED_URL" >> $GITHUB_ENV
 
-      - name: Wait for manual test (leave time)
+          echo "$PRESIGNED_URL" > presigned-url.txt
+          echo "📎 Presigned URL saved to presigned-url.txt"
+
+          echo "Self-test: downloading file via presigned URL..."
+          curl -s -o downloaded-via-url.txt "$PRESIGNED_URL"
+
+          echo "Comparing content..."
+          if diff test-file.txt downloaded-via-url.txt; then
+            echo "✅ Presigned URL works perfectly – file content matches"
+          else
+            echo "❌ Content mismatch"
+            exit 1
+          fi
+
+      - name: Upload presigned URL as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: presigned-url
+          path: presigned-url.txt
+          retention-days: 1
+
+      - name: Wait to keep file alive for manual test
         run: |
-          echo "Try the URL above from your browser or curl within the next 2 minutes."
-          echo "The workflow will clean up the file automatically when you're done."
-          sleep 60   # give you a little time to copy the link
+          echo "⏳ The test file will remain available for 2 more minutes."
+          echo "   Download the artifact now and curl the URL quickly!"
+          sleep 130   # slightly over 2 min to be safe
 
-      - name: Clean up test file
+      - name: Clean up test file from S3
         if: always()
         env:
           BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
