@@ -293,7 +293,7 @@ def upload_to_s3(file_path, file_name):
         logger.error("No S3 accounts configured")
         return None
 
-    # Find an account with > 100 MB free space
+    # Find an account with > 100 MB free space (30s timeout)
     best = None
     for acc in accounts:
         try:
@@ -316,13 +316,13 @@ def upload_to_s3(file_path, file_name):
             free = 5 * 1024 * 1024 * 1024 - used
             if free > 100 * 1024 * 1024:
                 best = acc
-                logger.info(f"Selected S3 bucket '{acc['bucket']}' with {free//1024//1024} MB free")
+                logger.info(f"Selected bucket '{acc['bucket']}' ({free//1024//1024} MB free)")
                 break
         except Exception as e:
-            logger.warning(f"Error checking S3 bucket '{acc['bucket']}': {e}")
+            logger.warning(f"Skip bucket '{acc['bucket']}': {e}")
 
     if not best:
-        logger.error("No S3 bucket with sufficient free space")
+        logger.error("No bucket with enough free space")
         return None
 
     acc = best
@@ -334,21 +334,22 @@ def upload_to_s3(file_path, file_name):
         "AWS_DEFAULT_REGION": acc["region"],
     }
 
-    # Upload with 3‑minute timeout
+    # ---- Upload with 3‑minute timeout ----
     cmd_upload = [
         "aws", "s3", "cp", file_path, f"s3://{acc['bucket']}/{s3_key}",
         "--endpoint-url", acc["endpoint"], "--region", acc["region"]
     ]
     try:
+        logger.info("Starting S3 upload (timeout 180s)…")
         upload_res = subprocess.run(cmd_upload, capture_output=True, text=True, env=env, timeout=180)
         if upload_res.returncode != 0:
-            logger.error(f"S3 upload failed (rc={upload_res.returncode}): {upload_res.stderr.strip()}")
+            logger.error(f"Upload failed (rc={upload_res.returncode}): {upload_res.stderr.strip()}")
             return None
     except subprocess.TimeoutExpired:
         logger.error("S3 upload timed out after 3 minutes")
         return None
 
-    # Presigned URL (2 hours), 15s timeout
+    # ---- Presigned URL (15s timeout) ----
     cmd_presign = [
         "aws", "s3", "presign", f"s3://{acc['bucket']}/{s3_key}",
         "--endpoint-url", acc["endpoint"], "--region", acc["region"],
@@ -357,14 +358,14 @@ def upload_to_s3(file_path, file_name):
     try:
         presign_res = subprocess.run(cmd_presign, capture_output=True, text=True, env=env, timeout=15)
         if presign_res.returncode != 0:
-            logger.error(f"Presign failed (rc={presign_res.returncode}): {presign_res.stderr.strip()}")
+            logger.error(f"Presign failed: {presign_res.stderr.strip()}")
             return None
     except subprocess.TimeoutExpired:
         logger.error("Presign timed out")
         return None
     presigned = presign_res.stdout.strip()
 
-    # Marker file for cleanup
+    # ---- Marker file (15s timeout) ----
     expire_epoch = int(time.time()) + 7200
     marker_key = f"{s3_key}.txt"
     with open("/tmp/marker.txt", "w") as f:
@@ -375,9 +376,10 @@ def upload_to_s3(file_path, file_name):
     ]
     subprocess.run(cmd_marker, capture_output=True, text=True, env=env, timeout=15)
 
-    logger.info(f"S3 file uploaded, presigned URL generated")
+    logger.info("S3 upload successful")
     return presigned
-    
+
+
 def main():
     logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
     out_file = None
