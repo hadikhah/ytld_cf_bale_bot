@@ -16,6 +16,7 @@ ACTION = os.environ.get("ACTION", "formats")
 CHAT_ID = int(os.environ.get("CHAT_ID", "0"))
 VIDEO_URL = os.environ.get("VIDEO_URL", "")
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
+DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")   # new: bale or s3
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
@@ -266,6 +267,109 @@ def cleanup():
             f.unlink()
         os.rmdir(TEMP_DIR)
 
+# ---------- S3 upload / presign ----------
+def upload_to_s3(file_path, file_name):
+    """Uploads the file to the most suitable S3 bucket and returns a presigned URL (2h expiry)."""
+    accounts = []
+    for i in range(1, 6):
+        prefix = f"S3_ACCOUNT_{i}_"
+        endpoint = os.environ.get(f"{prefix}ENDPOINT")
+        if not endpoint:
+            continue
+        access_key = os.environ.get(f"{prefix}ACCESS_KEY")
+        secret_key = os.environ.get(f"{prefix}SECRET_KEY")
+        region = os.environ.get(f"{prefix}REGION")
+        bucket = os.environ.get(f"{prefix}BUCKET_NAME")
+        if not all([access_key, secret_key, region, bucket]):
+            continue
+        accounts.append({
+            "endpoint": endpoint,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "region": region,
+            "bucket": bucket,
+        })
+
+    if not accounts:
+        logger.error("No S3 accounts configured")
+        return None
+
+    # Find an account with > 100 MB free space
+    best = None
+    for acc in accounts:
+        try:
+            env = {
+                **os.environ,
+                "AWS_ACCESS_KEY_ID": acc["access_key"],
+                "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
+                "AWS_DEFAULT_REGION": acc["region"],
+            }
+            cmd = [
+                "aws", "s3", "ls", f"s3://{acc['bucket']}/",
+                "--recursive", "--endpoint-url", acc["endpoint"],
+                "--region", acc["region"], "--summarize"
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            size_line = [l for l in res.stdout.splitlines() if "Total Size" in l]
+            used = 0
+            if size_line:
+                used = int(size_line[0].split(":")[-1].strip())
+            free = 5 * 1024 * 1024 * 1024 - used   # 5 GB limit
+            if free > 100 * 1024 * 1024:           # > 100 MB free
+                best = acc
+                logger.info(f"Selected S3 bucket '{acc['bucket']}' with {free//1024//1024} MB free")
+                break
+        except Exception as e:
+            logger.warning(f"Error checking S3 bucket '{acc['bucket']}': {e}")
+
+    if not best:
+        logger.error("No S3 bucket with sufficient free space")
+        return None
+
+    acc = best
+    s3_key = f"{file_name}_{int(time.time())}.mp4"
+    env = {
+        **os.environ,
+        "AWS_ACCESS_KEY_ID": acc["access_key"],
+        "AWS_SECRET_ACCESS_KEY": acc["secret_key"],
+        "AWS_DEFAULT_REGION": acc["region"],
+    }
+
+    # Upload
+    cmd_upload = [
+        "aws", "s3", "cp", file_path, f"s3://{acc['bucket']}/{s3_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"]
+    ]
+    if subprocess.run(cmd_upload, capture_output=True, text=True, env=env).returncode != 0:
+        logger.error("S3 upload failed")
+        return None
+
+    # Presigned URL (2 hours)
+    cmd_presign = [
+        "aws", "s3", "presign", f"s3://{acc['bucket']}/{s3_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"],
+        "--expires-in", "7200"
+    ]
+    presign_res = subprocess.run(cmd_presign, capture_output=True, text=True, env=env)
+    if presign_res.returncode != 0:
+        logger.error("Presign failed")
+        return None
+    presigned = presign_res.stdout.strip()
+
+    # Marker file for cleanup
+    expire_epoch = int(time.time()) + 7200
+    marker_key = f"{s3_key}.txt"
+    with open("/tmp/marker.txt", "w") as f:
+        f.write(str(expire_epoch))
+    cmd_marker = [
+        "aws", "s3", "cp", "/tmp/marker.txt", f"s3://{acc['bucket']}/{marker_key}",
+        "--endpoint-url", acc["endpoint"], "--region", acc["region"]
+    ]
+    subprocess.run(cmd_marker, capture_output=True, text=True, env=env)
+
+    logger.info(f"S3 file uploaded, presigned URL generated")
+    return presigned
+
 def main():
     logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
     out_file = None
@@ -278,7 +382,6 @@ def main():
                 send_message("❌ No downloadable formats found.")
                 return
             buttons, row = [], []
-            # Show ALL formats now (previously limited to 6)
             for f in formats:
                 cb = f"format|{quote(VIDEO_URL, safe='')}|{quote(f['format_id'], safe='')}"
                 row.append({"text": f["label"], "callback_data": cb})
@@ -295,8 +398,6 @@ def main():
                 raise ValueError("Missing format_id")
             
             send_message("⏳ Fetching video details and starting download...")
-            
-            # Fetch the title and clean it for safe file naming
             clean_title = get_clean_title(VIDEO_URL)
             base_name = f"{clean_title}_{FORMAT_ID}"
             
@@ -305,19 +406,35 @@ def main():
             
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
-            
-            send_message(f"📤 Uploading **{clean_title}** ({file_size//1024//1024} MB) as a multi-part zip...")
-            split_and_send(out_file, base_name)
-            
-            # Send a user-friendly instruction message on how to handle the files
-            success_msg = (
-                "✅ Download complete!\n\n"
-                "**How to open your video:**\n"
-                "1. Download all the parts (`.z01`, `.z02`... and `.zip`) into the *same folder*.\n"
-                "2. Open/Extract ONLY the final `.zip` file.\n"
-                "3. Your system will automatically pull the pieces together to rebuild the full `.mp4` video."
-            )
-            send_message(success_msg)
+
+            # Delivery method handling
+            if DELIVERY_METHOD == "s3":
+                send_message("☁️ Uploading to cloud and generating download link...")
+                url = upload_to_s3(out_file, base_name)
+                if url:
+                    send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                else:
+                    send_message("❌ Cloud upload failed. Please try again later.")
+            else:
+                # Default 'bale' – try Bale, fallback to S3 on failure
+                try:
+                    send_message(f"📤 Uploading **{clean_title}** ({file_size//1024//1024} MB) as a multi-part zip...")
+                    split_and_send(out_file, base_name)
+                    send_message(
+                        "✅ Download complete!\n\n"
+                        "**How to open your video:**\n"
+                        "1. Download all the parts (`.z01`, `.z02`... and `.zip`) into the *same folder*.\n"
+                        "2. Open/Extract ONLY the final `.zip` file.\n"
+                        "3. Your system will automatically pull the pieces together to rebuild the full `.mp4` video."
+                    )
+                except Exception as e:
+                    logger.exception("Bale upload failed, falling back to S3")
+                    send_message("⚠️ Bale upload failed. Trying cloud upload instead...")
+                    url = upload_to_s3(out_file, base_name)
+                    if url:
+                        send_message(f"✅ *Your download link (valid 2 hours):*\n{url}")
+                    else:
+                        send_message("❌ All upload methods failed. Sorry!")
             
     except Exception as e:
         error_occurred = True
@@ -327,15 +444,12 @@ def main():
             logger.info(f"Saving failed file as artifact: {out_file}")
             os.makedirs("artifacts", exist_ok=True)
             os.rename(out_file, f"artifacts/{os.path.basename(out_file)}")
-        # Do NOT re-raise here – let finally block execute and then exit
 
     finally:
-        # Clean up temporary files
         if out_file and os.path.exists(out_file):
             os.remove(out_file)
         cleanup()
 
-        # Always unlock the Cloudflare Worker queue for download actions
         worker_url = os.environ.get("WORKER_URL")
         worker_secret = os.environ.get("WORKER_SECRET")
         if worker_url and worker_secret and ACTION == "download":
@@ -349,7 +463,6 @@ def main():
             except Exception as e:
                 logger.error(f"Failed to unlock user queue: {e}")
 
-        # Exit with non-zero code if an error occurred (optional, for CI/CD)
         if error_occurred:
             sys.exit(1)
 
