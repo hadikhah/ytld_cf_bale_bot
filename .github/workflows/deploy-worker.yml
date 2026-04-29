@@ -35,7 +35,6 @@ jobs:
                   echo "Generated wrangler.toml:"
                   cat wrangler.toml
 
-
             - name: Set Cloudflare Worker Secrets
               env:
                   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -45,6 +44,7 @@ jobs:
                   BALE_PAYMENT_TOKEN: ${{ secrets.BALE_PAYMENT_TOKEN }}
                   ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
                   WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+                  ENABLE_S3: ${{ secrets.ENABLE_S3 }}
               run: |
                   # Set each secret via wrangler
                   echo "$BALE_BOT_TOKEN" | npx wrangler secret put BALE_BOT_TOKEN
@@ -53,6 +53,7 @@ jobs:
                   echo "$BALE_PAYMENT_TOKEN" | npx wrangler secret put BALE_PAYMENT_TOKEN
                   echo "$ADMIN_CHAT_ID" | npx wrangler secret put ADMIN_CHAT_ID
                   echo "$WORKER_SECRET" | npx wrangler secret put WORKER_SECRET
+                  echo "${ENABLE_S3}" | npx wrangler secret put ENABLE_S3
 
 
             - name: Deploy to Cloudflare
