@@ -89,6 +89,20 @@ jobs:
       - name: Install AWS CLI
         run: pip install --quiet awscli
 
+      - name: Quick S3 connectivity check
+        if: inputs.action == 'download' && inputs.delivery == 's3'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCOUNT_1_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_ACCOUNT_1_SECRET_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_ACCOUNT_1_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ACCOUNT_1_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_ACCOUNT_1_BUCKET_NAME }}
+        run: |
+          echo "test" > /tmp/test-connectivity.txt
+          aws s3 cp /tmp/test-connectivity.txt s3://${S3_BUCKET}/test-connectivity.txt \
+            --endpoint-url ${S3_ENDPOINT} --region ${AWS_DEFAULT_REGION}
+          echo "OK"
+
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
