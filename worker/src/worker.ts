@@ -477,6 +477,7 @@ async function processUpdate(env: Env, update: any) {
       `• 🌦️ *Weather* – \`/weather <city>\` for hourly + 7‑day forecast.\n`+
       `• 📦 *Webpage Saver* – \`/getpage <url>\` downloads the full page as a ZIP.\n`+
       `• 🌐 *Web Search* – \`/search <query>\` for web search.\n` +
+      `• 🐙 *GitHub* – \`/gh search <query>\`, \`/gh repo owner/repo\`\n` +
       `• 💎 *Premium* – Priority queue. Use /buy to upgrade.`;
     await callBaleApi(env, 'sendMessage', {
       chat_id: chatId,
