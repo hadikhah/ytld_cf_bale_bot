@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import { searchYouTube, searchWeb, buildYtMessage } from "./search";
 import { searchPapers, buildPaperMessage } from "./paper_search";
 import { getWeatherReport } from "./weather";
+import { searchRepos, getRepoDetails, getIssues, getPulls, buildSearchMessage, buildRepoMessage, buildIssueList } from "./github";
+
 
 export interface Env {
   BOT_STATE: KVNamespace;
@@ -348,6 +350,109 @@ async function processUpdate(env: Env, update: any) {
         await answerCallbackSafe(env, callbackId);
         return;
     }
+          // ---------- GitHub search pagination ----------
+      if (cbData.startsWith('gh_search|')) {
+        const [, queryEnc, pageStr] = cbData.split('|');
+        const query = decodeURIComponent(queryEnc);
+        const page = parseInt(pageStr);
+        const result = await searchRepos(query, page);
+        const { text: msgText, keyboard } = buildSearchMessage(result, query, page);
+        await callBaleApi(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: msgText,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+
+      // ---------- GitHub repo view ----------
+      if (cbData.startsWith('gh_repo|')) {
+        const repoFull = decodeURIComponent(cbData.substring(8));
+        const [owner, repo] = repoFull.split('/');
+        const details = await getRepoDetails(owner, repo);
+        if (!details) { await answerCallbackSafe(env, callbackId, 'Repository not found.', true); return; }
+        const { text: msgText, keyboard } = buildRepoMessage(details);
+        await callBaleApi(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: msgText,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+
+      // ---------- GitHub issues / PRs ----------
+      if (cbData.startsWith('gh_issues|') || cbData.startsWith('gh_pulls|')) {
+        const parts = cbData.split('|');
+        const type = parts[0] === 'gh_issues' ? 'issues' : 'pulls';
+        const fullName = decodeURIComponent(parts[1]);
+        const state = parts[2] || 'open';
+        const page = parts[3] ? parseInt(parts[3]) : 1;
+        const [owner, repo] = fullName.split('/');
+        const items = type === 'issues' ? await getIssues(owner, repo, state, page) : await getPulls(owner, repo, state, page);
+        const { text: msgText, keyboard } = buildIssueList(items, type, fullName, state, page);
+        await callBaleApi(env, 'editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: msgText,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: keyboard },
+        });
+        await answerCallbackSafe(env, callbackId);
+        return;
+      }
+
+      // ---------- GitHub download ----------
+      if (cbData.startsWith('gh_dl|')) {
+        const fullName = decodeURIComponent(cbData.substring(6));
+        const [owner, repo] = fullName.split('/');
+        // Direct download via archive URL
+        const archiveUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
+        // Bale can accept document by URL if it's <20MB. We'll try direct send.
+        try {
+          const resp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendDocument`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              document: archiveUrl,
+              caption: `${fullName}.zip`,
+            }),
+          });
+          const json = await resp.json();
+          if (resp.ok && json.ok) {
+            await answerCallbackSafe(env, callbackId, '✅ Repository ZIP sent.');
+          } else {
+            // Fallback to GitHub Action if file too large or error
+            throw new Error(json.description || 'sendDocument failed');
+          }
+        } catch (e) {
+          console.log('GitHub download direct failed, trying workflow:', e);
+          const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+          if (isQueued === 'true') {
+            await answerCallbackSafe(env, callbackId, '⚠️ You already have a download in progress.', true);
+            return;
+          }
+          await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+          await answerCallbackSafe(env, callbackId, 'Downloading via action...');
+          await callBaleApi(env, 'sendMessage', {
+            chat_id: chatId,
+            text: `⏳ Fetching repository: \`${fullName}\`\nYou'll receive the ZIP shortly.`,
+            parse_mode: 'Markdown',
+          });
+          await triggerWorkflow(env, {
+            action: 'gh_download',
+            chat_id: chatId.toString(),
+            repo_full: fullName,
+          });
+        }
+        return;
+      }
 
     else if (cbData === 'check_premium') {
       const access = await hasAccess(env, chatId);
@@ -488,6 +593,38 @@ async function processUpdate(env: Env, update: any) {
       text: result.text,
       parse_mode: "Markdown",
       reply_markup: result.keyboard.length ? { inline_keyboard: result.keyboard } : undefined,
+    });
+    return;
+  }
+
+    // ---------- GitHub search ----------
+  if (text.startsWith("/gh search ")) {
+    const query = text.slice(11).trim();
+    if (!query) return;
+    const result = await searchRepos(query);
+    const { text: msgText, keyboard } = buildSearchMessage(result, query, 1);
+    await callBaleApi(env, 'sendMessage', {
+      chat_id: chatId,
+      text: msgText,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard },
+    });
+    return;
+  }
+
+  // ---------- GitHub repo details ----------
+  if (text.startsWith("/gh repo ")) {
+    const repoFull = text.slice(9).trim();
+    const [owner, repo] = repoFull.split('/');
+    if (!owner || !repo) { await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Use `/gh repo owner/repo`' }); return; }
+    const details = await getRepoDetails(owner, repo);
+    if (!details) { await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Repository not found.' }); return; }
+    const { text: msgText, keyboard } = buildRepoMessage(details);
+    await callBaleApi(env, 'sendMessage', {
+      chat_id: chatId,
+      text: msgText,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard },
     });
     return;
   }
