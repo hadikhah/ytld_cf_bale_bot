@@ -20,7 +20,7 @@ DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
 
 TEMP_DIR = "temp_videos"
-MAX_FILE_SIZE = 9 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
+MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
 
 logging.basicConfig(
     level=logging.INFO,
