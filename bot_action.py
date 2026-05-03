@@ -249,7 +249,8 @@ def split_and_send(file_path, base_name):
         chunk_size = os.path.getsize(chunk)
         logger.info(f"Sending zip part {part_num}/{len(split_files)}: {os.path.basename(chunk)} ({chunk_size//1024//1024} MB)")
         if not send_document(chunk):
-            raise Exception(f"Failed to send zip part {part_num}")
+            if not send_document(chunk):
+                raise Exception(f"Failed to send zip part {part_num}")
         os.remove(chunk)
         time.sleep(1)
 
