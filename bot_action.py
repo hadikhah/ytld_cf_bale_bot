@@ -18,6 +18,7 @@ VIDEO_URL = os.environ.get("VIDEO_URL", "")
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
 DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
+MUSIC_QUERY = os.environ.get("QUERY", "")   # new: for music search
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
@@ -428,7 +429,110 @@ def main():
                             send_message("❌ All upload methods failed. Sorry!")
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled. Sorry!")
-            
+
+        # ---------- Music search ----------
+        elif ACTION == "music_search":
+            if not MUSIC_QUERY:
+                send_message("❌ No search query provided.")
+                return
+            send_message(f"🔎 Searching YouTube Music for: *{MUSIC_QUERY}*")
+            cmd = [
+                "yt-dlp",
+                "--no-check-certificates",
+                "--dump-json",
+                f"ytsearch5:{MUSIC_QUERY}"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"Music search failed: {result.stderr}")
+                send_message("❌ Search failed. Please try again.")
+                return
+            songs = []
+            for line in result.stdout.strip().split('\n'):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except:
+                    continue
+                title = data.get("title", "Unknown")
+                uploader = data.get("uploader", "Unknown artist")
+                duration = data.get("duration", 0) or 0
+                url = data.get("webpage_url") or data.get("url")
+                if not url:
+                    continue
+                songs.append({
+                    "title": title,
+                    "uploader": uploader,
+                    "duration": duration,
+                    "url": url,
+                })
+            if not songs:
+                send_message("❌ No songs found.")
+                return
+            buttons, row = [], []
+            for s in songs:
+                dur_str = f"{s['duration']//60}:{s['duration']%60:02d}" if s['duration'] else "?"
+                cb = f"music|{quote(s['url'], safe='')}"
+                label = f"{s['title'][:30]} – {s['uploader'][:15]} ({dur_str})"
+                row.append({"text": label, "callback_data": cb})
+                if len(row) == 1:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            send_message("🎵 *Search results:*", {"inline_keyboard": buttons})
+
+        # ---------- Music download ----------
+        elif ACTION == "music_download":
+            if not VIDEO_URL:
+                raise ValueError("Missing video_url (song URL)")
+            send_message("⏳ Downloading and converting to MP3…")
+            clean_title = get_clean_title(VIDEO_URL)
+            base_name = f"{clean_title}_audio"
+            out_file = os.path.join(TEMP_DIR, f"{base_name}.mp3")
+            os.makedirs(TEMP_DIR, exist_ok=True)
+            cmd = [
+                "yt-dlp",
+                "--no-check-certificates",
+                "-f", "bestaudio",
+                "--extract-audio",
+                "--audio-format", "mp3",
+                "-o", out_file,
+                VIDEO_URL
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            file_size = os.path.getsize(out_file)
+
+            delivery_method = DELIVERY_METHOD
+            if delivery_method == "s3" and not ENABLE_S3:
+                logger.info("S3 disabled – falling back to Bale")
+                delivery_method = "bale"
+
+            if delivery_method == "s3":
+                send_message("☁️ Uploading to cloud…")
+                url = upload_to_s3(out_file, base_name)
+                if url:
+                    send_message(f"✅ *Download link (valid 2 h):*\n{url}")
+                else:
+                    send_message("❌ Cloud upload failed.")
+            else:
+                try:
+                    send_message(f"📤 Uploading MP3 ({file_size//1024//1024} MB)…")
+                    split_and_send(out_file, base_name)
+                    send_message("✅ Download complete!")
+                except Exception as e:
+                    logger.exception("Bale upload failed")
+                    if ENABLE_S3:
+                        send_message("⚠️ Bale upload failed. Trying cloud…")
+                        url = upload_to_s3(out_file, base_name)
+                        if url:
+                            send_message(f"✅ *Download link:*\n{url}")
+                        else:
+                            send_message("❌ All upload methods failed.")
+                    else:
+                        send_message("❌ Bale upload failed and S3 is not enabled.")
+
     except Exception as e:
         error_occurred = True
         logger.exception("Action failed")
@@ -443,7 +547,7 @@ def main():
         cleanup()
         worker_url = os.environ.get("WORKER_URL")
         worker_secret = os.environ.get("WORKER_SECRET")
-        if worker_url and worker_secret and ACTION == "download":
+        if worker_url and worker_secret and ACTION in ("download", "music_download"):
             try:
                 requests.post(
                     f"{worker_url}/github/done",
