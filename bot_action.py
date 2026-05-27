@@ -438,6 +438,7 @@ def main():
             send_message(f"🔎 Searching YouTube Music for: *{MUSIC_QUERY}*")
             cmd = [
                 "yt-dlp",
+                "--cookies", "cookies.txt",          # <-- add this line
                 "--no-check-certificates",
                 "--dump-json",
                 f"ytsearch5:{MUSIC_QUERY}"
@@ -494,6 +495,7 @@ def main():
             os.makedirs(TEMP_DIR, exist_ok=True)
             cmd = [
                 "yt-dlp",
+                "--cookies", "cookies.txt",          # <-- add this line
                 "--no-check-certificates",
                 "-f", "bestaudio",
                 "--extract-audio",
