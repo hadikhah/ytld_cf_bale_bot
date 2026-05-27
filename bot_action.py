@@ -565,7 +565,7 @@ def main():
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled.")
 
-        # ---------- Batch music download (individual sends, clean names, with metadata) ----------
+        # ---------- Batch music download (individual sends, clean names, with metadata & failure stop) ----------
         elif ACTION == "batch_music":
             if not MUSIC_QUERY:
                 raise ValueError("No song list provided")
@@ -581,6 +581,8 @@ def main():
             os.makedirs(temp_dir, exist_ok=True)
             success_count = 0
             fail_count = 0
+            consecutive_fails = 0
+            batch_aborted = False
             for idx, query in enumerate(lines, 1):
                 url = search_first_song(query)
                 if not url:
@@ -609,42 +611,81 @@ def main():
                     mp3_files = list(Path(temp_dir).glob("*.mp3"))
                     if not mp3_files:
                         fail_count += 1
+                        consecutive_fails += 1
+                        if consecutive_fails >= 2:
+                            batch_aborted = True
+                            break
                         continue
                     # Get the last created file (just in case there are leftovers)
                     out_file = str(max(mp3_files, key=os.path.getctime))
                     if os.path.getsize(out_file) == 0:
                         fail_count += 1
+                        consecutive_fails += 1
+                        if consecutive_fails >= 2:
+                            batch_aborted = True
+                            break
                         continue
                     # Send a descriptive message before the file
-                    # We can extract the title from the filename
                     song_title = Path(out_file).stem
                     send_message(f"🎵 {idx}/{len(lines)}: {song_title}")
                     file_size = os.path.getsize(out_file)
-                    logger.info(f"Sending {song_title} ({file_size//1024//1024} MB)")
+                    logger.info(f"Uploading {song_title} ({file_size//1024//1024} MB)")
                     try:
                         split_and_send(out_file, song_title)
                         success_count += 1
+                        consecutive_fails = 0   # reset on success
                     except Exception as e:
                         logger.error(f"Upload failed for '{song_title}': {e}")
+                        fail_count += 1
+                        consecutive_fails += 1
+                        # Try S3 fallback if enabled
                         if ENABLE_S3:
                             url_s3 = upload_to_s3(out_file, song_title)
                             if url_s3:
                                 send_message(f"☁️ *{song_title}* → [Download]({url_s3})")
                                 success_count += 1
+                                consecutive_fails = 0   # S3 success counts as success
                             else:
-                                fail_count += 1
+                                # S3 also failed
+                                if consecutive_fails >= 2:
+                                    batch_aborted = True
+                                    break
                         else:
-                            fail_count += 1
+                            if consecutive_fails >= 2:
+                                batch_aborted = True
+                                break
                     # Clean up this file before next download
-                    os.remove(out_file)
+                    if os.path.exists(out_file):
+                        os.remove(out_file)
                 except Exception as e:
                     logger.error(f"Download failed for '{query}': {e}")
                     fail_count += 1
+                    consecutive_fails += 1
+                    if consecutive_fails >= 2:
+                        batch_aborted = True
+                        break
                 time.sleep(1)
-            result_msg = f"✅ Batch complete! Downloaded: {success_count}"
-            if fail_count > 0:
-                result_msg += f", Failed: {fail_count}"
-            send_message(result_msg)
+
+            if batch_aborted:
+                send_message("⚠️ Bale seems unstable. Two songs failed to upload. Stopping batch.")
+                # Unlock queue immediately
+                worker_url = os.environ.get("WORKER_URL")
+                worker_secret = os.environ.get("WORKER_SECRET")
+                if worker_url and worker_secret:
+                    try:
+                        requests.post(
+                            f"{worker_url}/github/done",
+                            json={"secret": worker_secret, "chat_id": str(CHAT_ID)},
+                            timeout=5
+                        )
+                        logger.info("Queue unlocked early due to batch abort.")
+                    except Exception as unlock_err:
+                        logger.error(f"Failed to unlock queue: {unlock_err}")
+            else:
+                result_msg = f"✅ Batch complete! Downloaded: {success_count}"
+                if fail_count > 0:
+                    result_msg += f", Failed: {fail_count}"
+                send_message(result_msg)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     except Exception as e:
