@@ -743,8 +743,8 @@ async function processUpdate(env: Env, update: any) {
       await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Please send a list of songs, one per line. Example:\n/batchmusic\nArtist - Title\nAnother Song' });
       return;
     }
-    if (lines.length > 5) {
-      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Maximum 5 songs at a time to keep download fast.' });
+    if (lines.length > 50) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Maximum 50 songs at a time to keep download fast.' });
       return;
     }
     const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
