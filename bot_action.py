@@ -417,7 +417,6 @@ def main():
             download_video(VIDEO_URL, FORMAT_ID, out_file)
             file_size = os.path.getsize(out_file)
 
-            # Delivery method handling
             delivery_method = DELIVERY_METHOD
             if delivery_method == "s3" and not ENABLE_S3:
                 logger.info("S3 disabled – falling back to Bale")
@@ -512,7 +511,7 @@ def main():
         elif ACTION == "music_download":
             if not VIDEO_URL:
                 raise ValueError("Missing video_url (song URL)")
-            send_message("⏳ Downloading and converting to MP3…")
+            send_message("⏳ Downloading and converting to MP3 (with album art & metadata)…")
             clean_title = get_clean_title(VIDEO_URL)
             base_name = f"{clean_title}_audio"
             out_file = os.path.join(TEMP_DIR, f"{base_name}.mp3")
@@ -525,6 +524,10 @@ def main():
                 "-f", "bestaudio",
                 "--extract-audio",
                 "--audio-format", "mp3",
+                "--embed-thumbnail",           # embed cover art
+                "--embed-metadata",            # write artist, title, etc.
+                "--embed-subs",                # embed lyrics if available
+                "--convert-subs", "lrc",       # convert captions to lyrics format
                 "-o", out_file,
                 VIDEO_URL
             ]
@@ -560,7 +563,7 @@ def main():
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled.")
 
-        # ---------- Batch music download (individual sends) ----------
+        # ---------- Batch music download (individual sends with full metadata) ----------
         elif ACTION == "batch_music":
             if not MUSIC_QUERY:
                 raise ValueError("No song list provided")
@@ -593,6 +596,10 @@ def main():
                     "-f", "bestaudio",
                     "--extract-audio",
                     "--audio-format", "mp3",
+                    "--embed-thumbnail",           # embed cover art
+                    "--embed-metadata",            # write artist, title, etc.
+                    "--embed-subs",                # embed lyrics if available
+                    "--convert-subs", "lrc",       # convert captions to lyrics format
                     "-o", out_file,
                     url
                 ]
