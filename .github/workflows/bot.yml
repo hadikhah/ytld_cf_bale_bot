@@ -10,12 +10,14 @@ on:
         options:
           - formats
           - download
+          - music_search
+          - music_download
       chat_id:
         description: 'Bale chat ID'
         required: true
       video_url:
         description: 'YouTube URL'
-        required: true
+        required: false
       format_id:
         description: 'Format ID (for download)'
         required: false
@@ -23,6 +25,9 @@ on:
         description: 'Delivery method (bale or s3)'
         required: false
         default: 'bale'
+      query:
+        description: 'Search query (for music)'
+        required: false
 
 jobs:
   run:
