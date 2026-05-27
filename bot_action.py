@@ -560,7 +560,7 @@ def main():
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled.")
 
-        # ---------- Batch music download ----------
+        # ---------- Batch music download (individual sends) ----------
         elif ACTION == "batch_music":
             if not MUSIC_QUERY:
                 raise ValueError("No song list provided")
@@ -568,20 +568,23 @@ def main():
             if not lines:
                 send_message("❌ Empty list.")
                 return
-            if len(lines) > 50:
-                send_message("⚠️ Maximum 50 songs at a time to keep download fast.")
+            if len(lines) > 10:
+                send_message("⚠️ Maximum 10 songs at a time.")
                 return
             send_message(f"📦 Processing {len(lines)} song(s):\n" + "\n".join(f"• {l}" for l in lines))
             temp_dir = "temp_music_batch"
             os.makedirs(temp_dir, exist_ok=True)
-            downloaded_files = []
+            success_count = 0
+            fail_count = 0
             for idx, query in enumerate(lines, 1):
                 url = search_first_song(query)
                 if not url:
                     logger.warning(f"Skipping '{query}' – no result found")
+                    fail_count += 1
                     continue
                 clean = get_clean_title(url)
-                out_file = os.path.join(temp_dir, f"{idx:02d}_{clean}.mp3")
+                base_name = f"{idx:02d}_{clean}"
+                out_file = os.path.join(temp_dir, f"{base_name}.mp3")
                 cmd = [
                     "yt-dlp",
                     "--cookies", "cookies.txt",
@@ -596,37 +599,32 @@ def main():
                 try:
                     subprocess.run(cmd, check=True, capture_output=True, text=True)
                     if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
-                        downloaded_files.append(out_file)
-                        logger.info(f"Downloaded: {out_file}")
+                        file_size = os.path.getsize(out_file)
+                        logger.info(f"Sending {base_name}.mp3 ({file_size//1024//1024} MB)")
+                        try:
+                            split_and_send(out_file, base_name)
+                            success_count += 1
+                        except Exception as e:
+                            logger.error(f"Upload failed for '{query}': {e}")
+                            if ENABLE_S3:
+                                url_s3 = upload_to_s3(out_file, base_name)
+                                if url_s3:
+                                    send_message(f"☁️ *{query}* → [Download]({url_s3})")
+                                    success_count += 1
+                                else:
+                                    fail_count += 1
+                            else:
+                                fail_count += 1
+                    else:
+                        fail_count += 1
                 except Exception as e:
                     logger.error(f"Download failed for '{query}': {e}")
-            if not downloaded_files:
-                send_message("❌ No songs could be downloaded.")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return
-            # Zip all files
-            zip_name = f"music_batch_{int(time.time())}.zip"
-            zip_path = os.path.join(temp_dir, zip_name)
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for f in downloaded_files:
-                    zipf.write(f, arcname=os.path.basename(f))
-            # Send zip
-            file_size = os.path.getsize(zip_path)
-            send_message(f"📤 Uploading {len(downloaded_files)} songs as ZIP ({file_size//1024//1024} MB)…")
-            try:
-                split_and_send(zip_path, "music_batch")
-                send_message("✅ Batch download complete!")
-            except Exception as e:
-                logger.exception("Bale upload failed for batch")
-                if ENABLE_S3:
-                    send_message("⚠️ Bale upload failed. Trying cloud…")
-                    url = upload_to_s3(zip_path, "music_batch")
-                    if url:
-                        send_message(f"✅ *Download link:*\n{url}")
-                    else:
-                        send_message("❌ All upload methods failed.")
-                else:
-                    send_message("❌ Bale upload failed and S3 is not enabled.")
+                    fail_count += 1
+                time.sleep(1)
+            result_msg = f"✅ Batch complete! Downloaded: {success_count}"
+            if fail_count > 0:
+                result_msg += f", Failed: {fail_count}"
+            send_message(result_msg)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     except Exception as e:
