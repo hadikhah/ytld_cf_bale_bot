@@ -568,8 +568,8 @@ def main():
             if not lines:
                 send_message("❌ Empty list.")
                 return
-            if len(lines) > 5:
-                send_message("⚠️ Maximum 5 songs at a time to keep download fast.")
+            if len(lines) > 50:
+                send_message("⚠️ Maximum 50 songs at a time to keep download fast.")
                 return
             send_message(f"📦 Processing {len(lines)} song(s):\n" + "\n".join(f"• {l}" for l in lines))
             temp_dir = "temp_music_batch"
