@@ -734,6 +734,34 @@ async function processUpdate(env: Env, update: any) {
     });
     return;
   }
+  // ---------- Batch music download ----------
+  if (text.startsWith("/batchmusic ")) {
+    const raw = text.slice(12).trim();
+    if (!raw) return;
+    const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length === 0) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Please send a list of songs, one per line. Example:\n/batchmusic\nArtist - Title\nAnother Song' });
+      return;
+    }
+    if (lines.length > 5) {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Maximum 5 songs at a time to keep download fast.' });
+      return;
+    }
+    const isQueued = await env.USER_PLANS.get(`dl_queue:${chatId}`);
+    if (isQueued === 'true') {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '⚠️ Download already in progress.' });
+      return;
+    }
+    await env.USER_PLANS.put(`dl_queue:${chatId}`, 'true');
+    await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: `📦 Queued ${lines.length} song(s) for download…` });
+    await triggerWorkflow(env, {
+      action: 'batch_music',
+      chat_id: chatId.toString(),
+      query: lines.join('\n'),
+      delivery: 'bale',   // will use Bale with S3 fallback
+    });
+    return;
+  }
   // ---------- YouTube Search ----------
   if (text.startsWith("/ysearch ") || text.startsWith("/ysearch_latest ")) {
     const args = text.split(" ");
