@@ -7,6 +7,8 @@ import subprocess
 import time
 import requests
 import re
+import zipfile
+import shutil
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,7 +20,7 @@ VIDEO_URL = os.environ.get("VIDEO_URL", "")
 FORMAT_ID = os.environ.get("FORMAT_ID", "")
 DELIVERY_METHOD = os.environ.get("DELIVERY_METHOD", "bale")
 ENABLE_S3 = os.environ.get("ENABLE_S3", "false").lower() == "true"
-MUSIC_QUERY = os.environ.get("QUERY", "")   # new: for music search
+MUSIC_QUERY = os.environ.get("QUERY", "")   # for music search & batch
 
 TEMP_DIR = "temp_videos"
 MAX_FILE_SIZE = 15 * 1024 * 1024   # 15 MB chunks (safe under Bale's 20 MB limit)
@@ -361,6 +363,27 @@ def upload_to_s3(file_path, file_name):
     logger.info("S3 upload successful")
     return presigned
 
+# ---------- Music batch helper ----------
+def search_first_song(query):
+    """Return the webpage URL of the first YouTube Music search result, or None."""
+    cmd = [
+        "yt-dlp",
+        "--cookies", "cookies.txt",
+        "--remote-components", "ejs:github",
+        "--no-check-certificates",
+        "--dump-json",
+        f"ytsearch1:{query}"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error(f"Search failed for '{query}': {result.stderr}")
+        return None
+    try:
+        data = json.loads(result.stdout.strip().split('\n')[0])
+        return data.get("webpage_url") or data.get("url")
+    except:
+        return None
+
 def main():
     logger.info(f"Action: {ACTION} for chat {CHAT_ID}")
     out_file = None
@@ -438,8 +461,8 @@ def main():
             send_message(f"🔎 Searching YouTube Music for: *{MUSIC_QUERY}*")
             cmd = [
                 "yt-dlp",
-                "--cookies", "cookies.txt",          # <-- add this line
-                "--remote-components", "ejs:github",   # <-- add this
+                "--cookies", "cookies.txt",
+                "--remote-components", "ejs:github",
                 "--no-check-certificates",
                 "--dump-json",
                 f"ytsearch5:{MUSIC_QUERY}"
@@ -496,8 +519,8 @@ def main():
             os.makedirs(TEMP_DIR, exist_ok=True)
             cmd = [
                 "yt-dlp",
-                "--cookies", "cookies.txt",          # <-- add this line
-                "--remote-components", "ejs:github",   # <-- add this
+                "--cookies", "cookies.txt",
+                "--remote-components", "ejs:github",
                 "--no-check-certificates",
                 "-f", "bestaudio",
                 "--extract-audio",
@@ -537,6 +560,75 @@ def main():
                     else:
                         send_message("❌ Bale upload failed and S3 is not enabled.")
 
+        # ---------- Batch music download ----------
+        elif ACTION == "batch_music":
+            if not MUSIC_QUERY:
+                raise ValueError("No song list provided")
+            lines = [l.strip() for l in MUSIC_QUERY.split('\n') if l.strip()]
+            if not lines:
+                send_message("❌ Empty list.")
+                return
+            if len(lines) > 5:
+                send_message("⚠️ Maximum 5 songs at a time to keep download fast.")
+                return
+            send_message(f"📦 Processing {len(lines)} song(s):\n" + "\n".join(f"• {l}" for l in lines))
+            temp_dir = "temp_music_batch"
+            os.makedirs(temp_dir, exist_ok=True)
+            downloaded_files = []
+            for idx, query in enumerate(lines, 1):
+                url = search_first_song(query)
+                if not url:
+                    logger.warning(f"Skipping '{query}' – no result found")
+                    continue
+                clean = get_clean_title(url)
+                out_file = os.path.join(temp_dir, f"{idx:02d}_{clean}.mp3")
+                cmd = [
+                    "yt-dlp",
+                    "--cookies", "cookies.txt",
+                    "--remote-components", "ejs:github",
+                    "--no-check-certificates",
+                    "-f", "bestaudio",
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "-o", out_file,
+                    url
+                ]
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    if os.path.exists(out_file) and os.path.getsize(out_file) > 0:
+                        downloaded_files.append(out_file)
+                        logger.info(f"Downloaded: {out_file}")
+                except Exception as e:
+                    logger.error(f"Download failed for '{query}': {e}")
+            if not downloaded_files:
+                send_message("❌ No songs could be downloaded.")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
+            # Zip all files
+            zip_name = f"music_batch_{int(time.time())}.zip"
+            zip_path = os.path.join(temp_dir, zip_name)
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for f in downloaded_files:
+                    zipf.write(f, arcname=os.path.basename(f))
+            # Send zip
+            file_size = os.path.getsize(zip_path)
+            send_message(f"📤 Uploading {len(downloaded_files)} songs as ZIP ({file_size//1024//1024} MB)…")
+            try:
+                split_and_send(zip_path, "music_batch")
+                send_message("✅ Batch download complete!")
+            except Exception as e:
+                logger.exception("Bale upload failed for batch")
+                if ENABLE_S3:
+                    send_message("⚠️ Bale upload failed. Trying cloud…")
+                    url = upload_to_s3(zip_path, "music_batch")
+                    if url:
+                        send_message(f"✅ *Download link:*\n{url}")
+                    else:
+                        send_message("❌ All upload methods failed.")
+                else:
+                    send_message("❌ Bale upload failed and S3 is not enabled.")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     except Exception as e:
         error_occurred = True
         logger.exception("Action failed")
@@ -549,9 +641,12 @@ def main():
         if out_file and os.path.exists(out_file):
             os.remove(out_file)
         cleanup()
+        # Also clean batch temp dir if it exists
+        if os.path.exists("temp_music_batch"):
+            shutil.rmtree("temp_music_batch", ignore_errors=True)
         worker_url = os.environ.get("WORKER_URL")
         worker_secret = os.environ.get("WORKER_SECRET")
-        if worker_url and worker_secret and ACTION in ("download", "music_download"):
+        if worker_url and worker_secret and ACTION in ("download", "music_download", "batch_music"):
             try:
                 requests.post(
                     f"{worker_url}/github/done",
