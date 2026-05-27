@@ -121,6 +121,7 @@ jobs:
       - name: Run bot task
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          QUERY: ${{ inputs.query }}
           ACTION: ${{ inputs.action }}
           CHAT_ID: ${{ inputs.chat_id }}
           VIDEO_URL: ${{ inputs.video_url }}
