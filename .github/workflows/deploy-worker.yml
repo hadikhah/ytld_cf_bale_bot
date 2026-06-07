@@ -70,4 +70,4 @@ jobs:
                   CLOUDFLARE_WORKER_URL: ${{ secrets.CLOUDFLARE_WORKER_URL }}  # e.g., https://your-worker.workers.dev
               run: |
                   curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${CLOUDFLARE_WORKER_URL}/telegram/webhook&drop_pending_updates=true"
-              echo "Telegram webhook updated"
+                  echo "Telegram webhook updated"
