@@ -105,4 +105,4 @@ async function triggerTelegramTransfer(env: Env, baleChatId: string, fileUrl: st
 function capitalize(s: string) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 // Import triggerWorkflow from worker.ts (we'll adjust)
-import { triggerWorkflow } from './worker';
+import { triggerWorkflow } from './utils';
