@@ -63,3 +63,11 @@ jobs:
                   accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
                   workingDirectory: "worker"
                   command: deploy
+                  
+            - name: Set Telegram webhook
+              env:
+                  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+                  CLOUDFLARE_WORKER_URL: ${{ secrets.CLOUDFLARE_WORKER_URL }}  # e.g., https://your-worker.workers.dev
+              run: |
+                  curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?url=${CLOUDFLARE_WORKER_URL}/telegram/webhook&drop_pending_updates=true"
+              echo "Telegram webhook updated"
