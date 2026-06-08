@@ -35,7 +35,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
   // Forward text messages
   if (text && !text.startsWith('/')) {
     const sender = msg.from?.first_name || msg.from?.username || 'Telegram';
-    const forwarded = `📩 *${sender}* (from Telegram):\n${escapeMarkdown(text)}`;
+    const forwarded = `📩 *${escapeMarkdown(sender)}* (from Telegram):\n${escapeMarkdown(text)}`;
     await callBaleApi(env, 'sendMessage', {
       chat_id: baleChatId,
       text: forwarded,
@@ -44,13 +44,50 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // Process files
-  const fileId = msg.document?.file_id || msg.video?.file_id || msg.audio?.file_id || msg.voice?.file_id || msg.photo?.slice(-1)[0]?.file_id;
+  // Determine file type (with animation/GIF support)
+  const doc = msg.document;
+  const video = msg.video;
+  const audio = msg.audio;
+  const voice = msg.voice;
+  const photo = msg.photo?.slice(-1)[0];
+  const animation = msg.animation; // Telegram GIFs
+
+  const fileId = doc?.file_id || video?.file_id || audio?.file_id || voice?.file_id || photo?.file_id || animation?.file_id;
   if (!fileId) return;
 
-  const fileType = msg.document ? 'document' : msg.video ? 'video' : msg.audio ? 'audio' : msg.voice ? 'voice' : 'photo';
-  const fileName = msg.document?.file_name || msg.video?.file_name || msg.audio?.file_name || `${fileType}_${msg.message_id}.jpg`;
-  const fileSize = msg.document?.file_size || msg.video?.file_size || msg.audio?.file_size || msg.voice?.file_size || msg.photo?.slice(-1)[0]?.file_size || 0;
+  let fileType: string;
+  let fileName: string;
+  let fileSize: number;
+
+  if (animation) {
+    fileType = 'animation';
+    fileName = animation.file_name || `animation_${msg.message_id}.mp4`;
+    fileSize = animation.file_size || 0;
+  } else if (video) {
+    fileType = 'video';
+    fileName = video.file_name || `video_${msg.message_id}.mp4`;
+    fileSize = video.file_size || 0;
+  } else if (audio) {
+    fileType = 'audio';
+    fileName = audio.file_name || `audio_${msg.message_id}.mp3`;
+    fileSize = audio.file_size || 0;
+  } else if (voice) {
+    fileType = 'voice';
+    fileName = `voice_${msg.message_id}.ogg`;
+    fileSize = voice.file_size || 0;
+  } else if (photo) {
+    fileType = 'photo';
+    fileName = `photo_${msg.message_id}.jpg`;
+    fileSize = photo.file_size || 0;
+  } else if (doc) {
+    fileType = 'document';
+    fileName = doc.file_name || `file_${msg.message_id}`;
+    fileSize = doc.file_size || 0;
+  } else {
+    return;
+  }
+
+  const caption = msg.caption ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}` : undefined;
 
   // Get file path from Telegram
   const fileInfo = await getTelegramFile(env, fileId);
@@ -60,10 +97,9 @@ export async function processTelegramUpdate(env: Env, update: any) {
   }
 
   const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
-  const caption = msg.caption ? `📩 *${msg.from?.first_name || 'Telegram'}*:\n${escapeMarkdown(msg.caption)}` : undefined;
 
+  // Small files: download and forward directly
   if (fileSize > 0 && fileSize <= 15 * 1024 * 1024) {
-    // Download and send directly to Bale
     try {
       const fileResp = await fetch(fileUrl);
       if (!fileResp.ok) throw new Error('Download failed');
@@ -71,9 +107,12 @@ export async function processTelegramUpdate(env: Env, update: any) {
       const form = new FormData();
       form.append('chat_id', baleChatId);
       if (caption) form.append('caption', caption);
-      form.append(fileType, new File([arrayBuf], fileName));
-      
-      const method = fileType === 'photo' ? 'sendPhoto' : fileType === 'voice' ? 'sendVoice' : 'sendDocument';
+      form.append(fileType === 'animation' ? 'animation' : fileType, new File([arrayBuf], fileName));
+
+      const method = fileType === 'photo' ? 'sendPhoto'
+        : fileType === 'voice' ? 'sendVoice'
+        : fileType === 'animation' ? 'sendAnimation'
+        : 'sendDocument';
       const baleResp = await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/${method}`, {
         method: 'POST',
         body: form,
@@ -85,7 +124,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
       }
     } catch (e) {
       console.error('Direct send failed:', e);
-      await sendTelegramMessage(env, chatId, '❌ Failed to send file. Trying alternative method...');
+      await sendTelegramMessage(env, chatId, '❌ Failed to send file. Trying workflow...');
       await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
     }
   } else {
@@ -112,8 +151,8 @@ async function sendTelegramMessage(env: Env, chatId: number | string, text: stri
 }
 
 async function triggerTelegramTransfer(env: Env, baleChatId: string, fileUrl: string, fileName: string) {
+  // Do NOT include 'action' – only the inputs defined in telegram_transfer.yml
   await triggerWorkflow(env, {
-    action: 'telegram_transfer',
     bale_chat_id: baleChatId,
     file_url: fileUrl,
     file_name: fileName,
