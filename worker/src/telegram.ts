@@ -50,7 +50,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
   const audio = msg.audio;
   const voice = msg.voice;
   const photo = msg.photo?.slice(-1)[0];
-  const animation = msg.animation; // Telegram GIFs
+  const animation = msg.animation;
 
   const fileId = doc?.file_id || video?.file_id || audio?.file_id || voice?.file_id || photo?.file_id || animation?.file_id;
   if (!fileId) return;
@@ -89,15 +89,37 @@ export async function processTelegramUpdate(env: Env, update: any) {
 
   const caption = msg.caption ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}` : undefined;
 
-  // Get file path from Telegram
+  // Get file path from Telegram (retry once)
   const fileInfo = await getTelegramFile(env, fileId);
   if (!fileInfo || !fileInfo.file_path) {
-    await sendTelegramMessage(env, chatId, '❌ Failed to fetch file info.');
+    console.error(`getFile failed for fileId ${fileId}, attempting retry...`);
+    // Wait a moment and try again
+    await new Promise(r => setTimeout(r, 1000));
+    const fileInfoRetry = await getTelegramFile(env, fileId);
+    if (!fileInfoRetry || !fileInfoRetry.file_path) {
+      await sendTelegramMessage(env, chatId, '❌ Failed to fetch file info. Please try again later.');
+      return;
+    }
+    // Use retry result
+    const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfoRetry.file_path}`;
+    await processFileTransfer(env, chatId, baleChatId, fileUrl, fileName, fileSize, fileType, caption);
     return;
   }
 
   const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+  await processFileTransfer(env, chatId, baleChatId, fileUrl, fileName, fileSize, fileType, caption);
+}
 
+async function processFileTransfer(
+  env: Env,
+  tgChatId: number,
+  baleChatId: string,
+  fileUrl: string,
+  fileName: string,
+  fileSize: number,
+  fileType: string,
+  caption?: string,
+) {
   // Small files: download and forward directly
   if (fileSize > 0 && fileSize <= 15 * 1024 * 1024) {
     try {
@@ -118,28 +140,33 @@ export async function processTelegramUpdate(env: Env, update: any) {
         body: form,
       });
       if (baleResp.ok) {
-        await sendTelegramMessage(env, chatId, '✅ Forwarded to Bale.');
+        await sendTelegramMessage(env, tgChatId, '✅ Forwarded to Bale.');
       } else {
         throw new Error(await baleResp.text());
       }
     } catch (e) {
       console.error('Direct send failed:', e);
-      await sendTelegramMessage(env, chatId, '❌ Failed to send file. Trying workflow...');
+      await sendTelegramMessage(env, tgChatId, '❌ Failed to send file. Trying workflow…');
       await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
     }
   } else {
     // Large file – dispatch workflow
-    await sendTelegramMessage(env, chatId, '📦 File is large, processing via workflow...');
+    await sendTelegramMessage(env, tgChatId, '📦 File is large, processing via workflow…');
     await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
   }
 }
 
 async function getTelegramFile(env: Env, fileId: string): Promise<{ file_path?: string } | null> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
-  const resp = await fetch(url);
-  if (!resp.ok) return null;
-  const data: any = await resp.json();
-  return data?.result;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    const data: any = await resp.json();
+    return data?.result;
+  } catch (e) {
+    console.error('getFile request error:', e);
+    return null;
+  }
 }
 
 async function sendTelegramMessage(env: Env, chatId: number | string, text: string) {
@@ -151,7 +178,6 @@ async function sendTelegramMessage(env: Env, chatId: number | string, text: stri
 }
 
 async function triggerTelegramTransfer(env: Env, baleChatId: string, fileUrl: string, fileName: string) {
-  // Do NOT include 'action' – only the inputs defined in telegram_transfer.yml
   await triggerWorkflow(env, {
     bale_chat_id: baleChatId,
     file_url: fileUrl,
