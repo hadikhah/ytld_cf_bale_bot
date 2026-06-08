@@ -54,7 +54,7 @@ jobs:
             send_message "⚠️ File too large – splitting into parts..."
             # Create split zip with the original file name as base
             zip -s 15m "${BASE_NAME}.zip" file.bin
-            PARTS=$(ls "${BASE_NAME}.z"* "${BASE_NAME}.zip" 2>/dev/null | sort -V)
+            PARTS=$(ls "${BASE_NAME}.z"* 2>/dev/null | sort -V)
             for part in $PARTS; do
               RESPONSE=$(curl -s -w "%{http_code}" -F "document=@$part" \
                          "https://tapi.bale.ai/bot${BALE_BOT_TOKEN}/sendDocument?chat_id=${CHAT_ID}")
