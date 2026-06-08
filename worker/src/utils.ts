@@ -1,4 +1,7 @@
-async function triggerWorkflow(
+// worker/src/utils.ts
+import { Env } from './worker';
+
+export async function triggerWorkflow(
   env: Env,
   inputs: Record<string, string>,
   workflowFile = "bot.yml"
@@ -20,9 +23,3 @@ async function triggerWorkflow(
   if (!resp.ok) throw new Error(`GitHub API error: ${resp.status}`);
   return true;
 }
-
-
-
-
-
-export { triggerWorkflow };
