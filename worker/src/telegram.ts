@@ -2,37 +2,30 @@
 import { Env } from './worker';
 import { triggerWorkflow } from './utils';
 
+const MAX_DIRECT_SIZE = 20 * 1024 * 1024;  // 20 MB – Telegram's getFile limit
+
 export async function processTelegramUpdate(env: Env, update: any) {
   const msg = update.message || update.channel_post;
   if (!msg) return;
 
-  // ---- DEBUG: send received file metadata back to the user ----
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
+
+  // ---------- Debug: show what we received ----------
   const debugInfo: string[] = [];
-  if (msg.document) {
-    debugInfo.push(`📄 Document: ${msg.document.file_name || 'unknown'} (${msg.document.file_size || 0} bytes)`);
-  }
-  if (msg.video) {
-    debugInfo.push(`🎬 Video: ${msg.video.file_name || 'unknown'} (${msg.video.file_size || 0} bytes)`);
-  }
-  if (msg.audio) {
-    debugInfo.push(`🎵 Audio: ${msg.audio.file_name || 'unknown'} (${msg.audio.file_size || 0} bytes)`);
-  }
-  if (msg.animation) {
-    debugInfo.push(`🎞️ Animation: ${msg.animation.file_name || 'unknown'} (${msg.animation.file_size || 0} bytes)`);
-  }
+  if (msg.document) debugInfo.push(`📄 Document: ${msg.document.file_name || 'unknown'} (${msg.document.file_size || 0} bytes)`);
+  if (msg.video)    debugInfo.push(`🎬 Video: ${msg.video.file_name || 'unknown'} (${msg.video.file_size || 0} bytes)`);
+  if (msg.audio)    debugInfo.push(`🎵 Audio: ${msg.audio.file_name || 'unknown'} (${msg.audio.file_size || 0} bytes)`);
+  if (msg.animation)debugInfo.push(`🎞️ Animation: ${msg.animation.file_name || 'unknown'} (${msg.animation.file_size || 0} bytes)`);
   if (msg.photo) {
     const largest = msg.photo[msg.photo.length - 1];
     debugInfo.push(`🖼️ Photo: ${largest.width}x${largest.height} (${largest.file_size || 0} bytes)`);
   }
   if (debugInfo.length > 0) {
-    await sendTelegramMessage(env, msg.chat.id, `🔍 *Received:*\n${debugInfo.join('\n')}`);
+    await sendTelegramMessage(env, chatId, `🔍 *Received:*\n${debugInfo.join('\n')}`);
   }
 
-  // ---- Rest of the processing ----
-  const chatId = msg.chat.id;
-  const text = msg.text?.trim();
-
-  // Handle linking code from Bale
+  // ---------- Link account ----------
   if (text && text.startsWith('/start ')) {
     const code = text.split(' ')[1];
     if (code) {
@@ -48,14 +41,14 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // Check if user is linked
+  // ---------- Check linked ----------
   const baleChatId = await env.USER_PLANS.get(`tg_to_bale:${chatId}`);
   if (!baleChatId) {
     await sendTelegramMessage(env, chatId, '⚠️ You are not linked to Bale yet. Get a link code from the Bale bot using /link and then send it here as: /start <code>');
     return;
   }
 
-  // Forward text messages
+  // ---------- Forward text ----------
   if (text && !text.startsWith('/')) {
     const sender = msg.from?.first_name || msg.from?.username || 'Telegram';
     const forwarded = `📩 *${escapeMarkdown(sender)}* (from Telegram):\n${escapeMarkdown(text)}`;
@@ -67,7 +60,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // Determine file type
+  // ---------- Handle files ----------
   const doc = msg.document;
   const video = msg.video;
   const audio = msg.audio;
@@ -110,39 +103,31 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // Files over 50 MB cannot be transferred via Telegram bot
-  if (fileSize > 50 * 1024 * 1024) {
-    await sendTelegramMessage(env, chatId, '❌ File is larger than 50 MB – Telegram bots cannot transfer files of this size. Please use a different method.');
+  // ---------- Hard limit: Telegram bots cannot fetch files > 20 MB ----------
+  if (fileSize > MAX_DIRECT_SIZE) {
+    await sendTelegramMessage(env, chatId,
+      `❌ File is too large (${(fileSize/1024/1024).toFixed(1)} MB). Telegram bots can only transfer files up to 20 MB.`
+    );
     return;
   }
 
-  const caption = msg.caption ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}` : undefined;
+  const caption = msg.caption
+    ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}`
+    : undefined;
 
-  // Get file path from Telegram
+  // ---------- Get download URL from Telegram ----------
   const fileInfo = await getTelegramFile(env, fileId);
   if (!fileInfo || !fileInfo.file_path) {
-    // Retry once
-    await new Promise(r => setTimeout(r, 2000));
-    const fileInfoRetry = await getTelegramFile(env, fileId);
-    if (!fileInfoRetry || !fileInfoRetry.file_path) {
-      console.error(`getFile failed for fileId ${fileId} (name: ${fileName}, size: ${fileSize})`);
-      await sendTelegramMessage(env, chatId, `❌ Failed to fetch file info from Telegram.\nFile: ${escapeMarkdown(fileName)} (${(fileSize/1024/1024).toFixed(1)} MB)`);
-      return;
-    }
-    await processFileTransfer(env, chatId, baleChatId, `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfoRetry.file_path}`, fileName, fileSize, fileType, caption);
+    console.error(`getFile failed for ${fileName} (${fileSize} bytes)`);
+    await sendTelegramMessage(env, chatId, `❌ Could not retrieve file from Telegram. Please try again.`);
     return;
   }
 
-  await processFileTransfer(env, chatId, baleChatId, `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`, fileName, fileSize, fileType, caption);
-}
+  const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
 
-async function processFileTransfer(
-  env: Env, tgChatId: number, baleChatId: string,
-  fileUrl: string, fileName: string, fileSize: number,
-  fileType: string, caption?: string
-) {
+  // ---------- Forward to Bale ----------
   if (fileSize <= 15 * 1024 * 1024) {
-    // Small file – send directly to Bale
+    // Small file – download and re‑upload to Bale directly
     try {
       const fileResp = await fetch(fileUrl);
       if (!fileResp.ok) throw new Error('Download failed');
@@ -161,21 +146,23 @@ async function processFileTransfer(
         body: form,
       });
       if (baleResp.ok) {
-        await sendTelegramMessage(env, tgChatId, '✅ Forwarded to Bale.');
+        await sendTelegramMessage(env, chatId, '✅ Forwarded to Bale.');
       } else {
         throw new Error(await baleResp.text());
       }
     } catch (e) {
       console.error('Direct send failed:', e);
-      await sendTelegramMessage(env, tgChatId, '❌ Failed to send file. Trying workflow…');
+      await sendTelegramMessage(env, chatId, '❌ Failed to send file directly. Trying workflow…');
       await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
     }
   } else {
-    // Large file – dispatch workflow
-    await sendTelegramMessage(env, tgChatId, '📦 File is large, processing via workflow…');
+    // Medium file (15–20 MB) – dispatch workflow to avoid Worker memory limits
+    await sendTelegramMessage(env, chatId, '📦 File is a bit large, processing via workflow…');
     await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
   }
 }
+
+// ---------- helpers ----------
 
 async function getTelegramFile(env: Env, fileId: string): Promise<{ file_path?: string } | null> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
@@ -197,7 +184,7 @@ async function sendTelegramMessage(env: Env, chatId: number | string, text: stri
   await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
   });
 }
 
