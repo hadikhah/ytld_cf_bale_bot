@@ -2,7 +2,7 @@
 import { Env } from './worker';
 import { triggerWorkflow } from './utils';
 
-const MAX_DIRECT_SIZE = 20 * 1024 * 1024;  // 20 MB – Telegram's getFile limit
+const MAX_DIRECT_SIZE = 20 * 1024 * 1024;   // files above this → workflow
 
 export async function processTelegramUpdate(env: Env, update: any) {
   const msg = update.message || update.channel_post;
@@ -103,19 +103,23 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // ---------- Hard limit: Telegram bots cannot fetch files > 20 MB ----------
-  if (fileSize > MAX_DIRECT_SIZE) {
-    await sendTelegramMessage(env, chatId,
-      `❌ File is too large (${(fileSize/1024/1024).toFixed(1)} MB). Telegram bots can only transfer files up to 20 MB.`
-    );
-    return;
-  }
-
   const caption = msg.caption
     ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}`
     : undefined;
 
-  // ---------- Get download URL from Telegram ----------
+  // ---------- Large files (>20 MB) → workflow directly (Worker never calls getFile) ----------
+  if (fileSize > MAX_DIRECT_SIZE) {
+    await sendTelegramMessage(env, chatId, '📦 File is large, processing via GitHub workflow…');
+    // Pass file_id, not URL – the workflow will fetch it
+    await triggerWorkflow(env, {
+      bale_chat_id: baleChatId,
+      file_id: fileId,
+      file_name: fileName,
+    }, 'telegram_transfer.yml');
+    return;
+  }
+
+  // ---------- Small files (≤20 MB) → Worker gets URL ----------
   const fileInfo = await getTelegramFile(env, fileId);
   if (!fileInfo || !fileInfo.file_path) {
     console.error(`getFile failed for ${fileName} (${fileSize} bytes)`);
@@ -125,9 +129,8 @@ export async function processTelegramUpdate(env: Env, update: any) {
 
   const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
 
-  // ---------- Forward to Bale ----------
   if (fileSize <= 15 * 1024 * 1024) {
-    // Small file – download and re‑upload to Bale directly
+    // Very small – Worker forwards directly
     try {
       const fileResp = await fetch(fileUrl);
       if (!fileResp.ok) throw new Error('Download failed');
@@ -156,14 +159,13 @@ export async function processTelegramUpdate(env: Env, update: any) {
       await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
     }
   } else {
-    // Medium file (15–20 MB) – dispatch workflow to avoid Worker memory limits
+    // Medium (15–20 MB) – dispatch workflow with URL
     await sendTelegramMessage(env, chatId, '📦 File is a bit large, processing via workflow…');
     await triggerTelegramTransfer(env, baleChatId, fileUrl, fileName);
   }
 }
 
-// ---------- helpers ----------
-
+// ---------- helpers (unchanged) ----------
 async function getTelegramFile(env: Env, fileId: string): Promise<{ file_path?: string } | null> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
   try {
