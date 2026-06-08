@@ -6,6 +6,29 @@ export async function processTelegramUpdate(env: Env, update: any) {
   const msg = update.message || update.channel_post;
   if (!msg) return;
 
+  // ---- DEBUG: send received file metadata back to the user ----
+  const debugInfo: string[] = [];
+  if (msg.document) {
+    debugInfo.push(`📄 Document: ${msg.document.file_name || 'unknown'} (${msg.document.file_size || 0} bytes)`);
+  }
+  if (msg.video) {
+    debugInfo.push(`🎬 Video: ${msg.video.file_name || 'unknown'} (${msg.video.file_size || 0} bytes)`);
+  }
+  if (msg.audio) {
+    debugInfo.push(`🎵 Audio: ${msg.audio.file_name || 'unknown'} (${msg.audio.file_size || 0} bytes)`);
+  }
+  if (msg.animation) {
+    debugInfo.push(`🎞️ Animation: ${msg.animation.file_name || 'unknown'} (${msg.animation.file_size || 0} bytes)`);
+  }
+  if (msg.photo) {
+    const largest = msg.photo[msg.photo.length - 1];
+    debugInfo.push(`🖼️ Photo: ${largest.width}x${largest.height} (${largest.file_size || 0} bytes)`);
+  }
+  if (debugInfo.length > 0) {
+    await sendTelegramMessage(env, msg.chat.id, `🔍 *Received:*\n${debugInfo.join('\n')}`);
+  }
+
+  // ---- Rest of the processing ----
   const chatId = msg.chat.id;
   const text = msg.text?.trim();
 
@@ -44,7 +67,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  // Determine file type (with animation/GIF support)
+  // Determine file type
   const doc = msg.document;
   const video = msg.video;
   const audio = msg.audio;
@@ -87,41 +110,39 @@ export async function processTelegramUpdate(env: Env, update: any) {
     return;
   }
 
-  const caption = msg.caption ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}` : undefined;
-
-  // Get file path from Telegram (retry once)
-  const fileInfo = await getTelegramFile(env, fileId);
-  if (!fileInfo || !fileInfo.file_path) {
-    console.error(`getFile failed for fileId ${fileId}, attempting retry...`);
-    // Wait a moment and try again
-    await new Promise(r => setTimeout(r, 1000));
-    const fileInfoRetry = await getTelegramFile(env, fileId);
-    if (!fileInfoRetry || !fileInfoRetry.file_path) {
-      await sendTelegramMessage(env, chatId, '❌ Failed to fetch file info. Please try again later.');
-      return;
-    }
-    // Use retry result
-    const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfoRetry.file_path}`;
-    await processFileTransfer(env, chatId, baleChatId, fileUrl, fileName, fileSize, fileType, caption);
+  // Files over 50 MB cannot be transferred via Telegram bot
+  if (fileSize > 50 * 1024 * 1024) {
+    await sendTelegramMessage(env, chatId, '❌ File is larger than 50 MB – Telegram bots cannot transfer files of this size. Please use a different method.');
     return;
   }
 
-  const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
-  await processFileTransfer(env, chatId, baleChatId, fileUrl, fileName, fileSize, fileType, caption);
+  const caption = msg.caption ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}` : undefined;
+
+  // Get file path from Telegram
+  const fileInfo = await getTelegramFile(env, fileId);
+  if (!fileInfo || !fileInfo.file_path) {
+    // Retry once
+    await new Promise(r => setTimeout(r, 2000));
+    const fileInfoRetry = await getTelegramFile(env, fileId);
+    if (!fileInfoRetry || !fileInfoRetry.file_path) {
+      console.error(`getFile failed for fileId ${fileId} (name: ${fileName}, size: ${fileSize})`);
+      await sendTelegramMessage(env, chatId, `❌ Failed to fetch file info from Telegram.\nFile: ${escapeMarkdown(fileName)} (${(fileSize/1024/1024).toFixed(1)} MB)`);
+      return;
+    }
+    await processFileTransfer(env, chatId, baleChatId, `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfoRetry.file_path}`, fileName, fileSize, fileType, caption);
+    return;
+  }
+
+  await processFileTransfer(env, chatId, baleChatId, `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`, fileName, fileSize, fileType, caption);
 }
 
 async function processFileTransfer(
-  env: Env,
-  tgChatId: number,
-  baleChatId: string,
-  fileUrl: string,
-  fileName: string,
-  fileSize: number,
-  fileType: string,
-  caption?: string,
+  env: Env, tgChatId: number, baleChatId: string,
+  fileUrl: string, fileName: string, fileSize: number,
+  fileType: string, caption?: string
 ) {
-  // Small files: download and forward directly
-  if (fileSize > 0 && fileSize <= 15 * 1024 * 1024) {
+  if (fileSize <= 15 * 1024 * 1024) {
+    // Small file – send directly to Bale
     try {
       const fileResp = await fetch(fileUrl);
       if (!fileResp.ok) throw new Error('Download failed');
@@ -160,7 +181,10 @@ async function getTelegramFile(env: Env, fileId: string): Promise<{ file_path?: 
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
   try {
     const resp = await fetch(url);
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.error(`getFile HTTP ${resp.status}: ${await resp.text()}`);
+      return null;
+    }
     const data: any = await resp.json();
     return data?.result;
   } catch (e) {
