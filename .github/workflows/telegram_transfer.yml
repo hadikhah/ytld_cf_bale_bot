@@ -7,8 +7,11 @@ on:
         description: 'Target Bale chat ID'
         required: true
       file_url:
-        description: 'Telegram file URL'
-        required: true
+        description: 'Telegram file URL (optional, if file_id is not used)'
+        required: false
+      file_id:
+        description: 'Telegram file ID (optional, if file_url is not used)'
+        required: false
       file_name:
         description: 'Original file name'
         required: true
@@ -18,8 +21,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Resolve download URL
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.file_id }}" ]; then
+            echo "Fetching file URL from Telegram using file_id..."
+            RESP=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${{ inputs.file_id }}")
+            FILE_PATH=$(echo "$RESP" | jq -r '.result.file_path')
+            if [ "$FILE_PATH" = "null" ] || [ -z "$FILE_PATH" ]; then
+              echo "Error: Could not get file path from Telegram"
+              exit 1
+            fi
+            FILE_URL="https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${FILE_PATH}"
+            echo "FILE_URL=$FILE_URL" >> $GITHUB_ENV
+          else
+            echo "Using provided file_url: ${{ inputs.file_url }}"
+            echo "FILE_URL=${{ inputs.file_url }}" >> $GITHUB_ENV
+          fi
+
       - name: Download file
-        run: curl -L -o file.bin "${{ inputs.file_url }}"
+        run: |
+          curl -L -o file.bin "$FILE_URL"
 
       - name: Send to Bale (with split if needed)
         env:
@@ -28,9 +51,7 @@ jobs:
         run: |
           FILE_SIZE=$(stat -c%s file.bin)
           MAX_SIZE=$((15 * 1024 * 1024))
-          # Use the original file name for the zip archive
           SAFE_NAME=$(echo "${{ inputs.file_name }}" | tr -d '\\/*?:"<>|')
-          # Remove extension to get base name for split parts
           BASE_NAME="${SAFE_NAME%.*}"
 
           send_message() {
@@ -52,7 +73,6 @@ jobs:
             fi
           else
             send_message "⚠️ File too large – splitting into parts..."
-            # Create split zip with the original file name as base
             zip -s 15m "${BASE_NAME}.zip" file.bin
             PARTS=$(ls "${BASE_NAME}.z"* 2>/dev/null | sort -V)
             for part in $PARTS; do
