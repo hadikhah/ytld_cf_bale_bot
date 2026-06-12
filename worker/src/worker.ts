@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import { searchYouTube, searchWeb, buildYtMessage } from "./search";
 import { searchPapers, buildPaperMessage } from "./paper_search";
 import { getWeatherReport } from "./weather";
+import { processTelegramUpdate } from './telegram';
+
 import {
   searchRepos, getRepoDetails, getIssues, getPulls,
   buildSearchMessage, buildRepoMessage, buildIssueList,
@@ -20,7 +22,9 @@ export interface Env {
   BALE_PAYMENT_TOKEN: string;
   ADMIN_CHAT_ID: string;
   WORKER_SECRET: string;
-  ENABLE_S3: string;                  // "true" to show S3 button
+  TELEGRAM_BOT_TOKEN: string;
+  ENABLE_S3: string;          
+  TG_CHANNEL_ID: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -703,6 +707,23 @@ async function processUpdate(env: Env, update: any) {
     return;
   }
 
+  // ---------- Link Telegram account ----------
+  if (text.startsWith('/link ')) {
+    const platform = text.slice(6).trim().toLowerCase();
+    if (platform !== 'telegram') {
+      await callBaleApi(env, 'sendMessage', { chat_id: chatId, text: '❌ Currently only `telegram` linking is supported. Use `/link telegram`.' });
+      return;
+    }
+    const code = 'tg_' + Math.random().toString(36).substring(2, 10);
+    await env.USER_PLANS.put(`link_code:${code}`, chatId.toString(), { expirationTtl: 300 });
+    await callBaleApi(env, 'sendMessage', {
+      chat_id: chatId,
+      text: `🔗 *Your Telegram link code:* \`${code}\`\n\nGo to your Telegram bot and send:\n/start ${code}\n\nThis code expires in 5 minutes.`,
+      parse_mode: 'Markdown',
+    });
+    return;
+  }
+  
   // ---------- Web Search ----------
   if (text.startsWith("/search ")) {
     const query = text.slice(8).trim();
@@ -1021,6 +1042,13 @@ export default {
         return Response.json({ success: true, message: "Queue unlocked" });
       }
       return new Response('Unauthorized', { status: 401 });
+    }
+
+        // ---------- Telegram webhook ----------
+    if (url.pathname === '/telegram/webhook' && request.method === 'POST') {
+      const update: any = await request.json();
+      ctx.waitUntil(processTelegramUpdate(env, update));
+      return new Response('OK');
     }
 
     return new Response('Not found', { status: 404 });

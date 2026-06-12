@@ -1,0 +1,57 @@
+name: Large Telegram Transfer (via user account)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bale_chat_id:
+        description: 'Target Bale chat ID'
+        required: true
+      channel_id:
+        description: 'Channel ID where the file was forwarded'
+        required: true
+      message_id:
+        description: 'Message ID in the channel'
+        required: true
+      file_name:
+        description: 'Original file name'
+        required: true
+      tg_chat_id:
+        description: 'Telegram chat ID (to send progress)'
+        required: true
+
+concurrency:
+  group: large-telegram-transfer
+  cancel-in-progress: false
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        run: pip install telethon requests
+
+      - name: Download via userbot and send to Bale
+        env:
+          TG_USER_SESSION: ${{ secrets.TG_USER_SESSION }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+          MESSAGE_ID: ${{ inputs.message_id }}
+          FILE_NAME: ${{ inputs.file_name }}
+          TG_CHAT_ID: ${{ inputs.tg_chat_id }}
+        run: python tg_download.py
+
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+        run: |
+          curl -s -X POST "$WORKER_URL/github/done" \
+               -H "Content-Type: application/json" \
+               -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
