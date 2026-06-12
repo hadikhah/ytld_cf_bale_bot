@@ -46,6 +46,7 @@ jobs:
                   ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
                   WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
                   ENABLE_S3: ${{ secrets.ENABLE_S3 }}
+                  TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
               run: |
                   echo "$BALE_BOT_TOKEN" | npx wrangler secret put BALE_BOT_TOKEN
                   echo "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -55,6 +56,7 @@ jobs:
                   echo "$ADMIN_CHAT_ID" | npx wrangler secret put ADMIN_CHAT_ID
                   echo "$WORKER_SECRET" | npx wrangler secret put WORKER_SECRET
                   echo "${ENABLE_S3}" | npx wrangler secret put ENABLE_S3
+                  echo "${TG_CHANNEL_ID}" | npx wrangler secret put TG_CHANNEL_ID
 
             - name: Deploy to Cloudflare
               id: deploy                        # ← give it an id
