@@ -1,5 +1,6 @@
 import os, subprocess, time
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 import requests
 
 # Official Telegram API credentials (public)
@@ -25,34 +26,37 @@ def upload_file(path, caption):
                       data={"chat_id": bale_chat, "caption": caption},
                       files={"document": f})
 
-client = TelegramClient(session=None, api_id=API_ID, api_hash=API_HASH)
-
 async def main():
-    await client.start(session=session_str)
-    message = await client.get_messages(channel_id, ids=message_id)
-    if not message or not message.document:
-        send_message("❌ File not found in channel.")
-        return
+    # Create client directly with the StringSession
+    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    await client.start()  # Will use the existing session string, no phone needed
+    try:
+        message = await client.get_messages(channel_id, ids=message_id)
+        if not message or not message.document:
+            send_message("❌ File not found in channel.")
+            return
 
-    path = await message.download_media(file=file_name)
-    file_size = os.path.getsize(path)
+        path = await message.download_media(file=file_name)
+        file_size = os.path.getsize(path)
 
-    if file_size <= MAX_SIZE:
-        upload_file(path, file_name)
-        send_message("✅ Large file forwarded from Telegram.")
-    else:
-        send_message("⚠️ File too large, splitting…")
-        base = os.path.splitext(file_name)[0]
-        subprocess.run(["zip", "-s", "15m", f"{base}.zip", file_name], check=True)
-        parts = sorted(
-            [f for f in os.listdir('.') if f.startswith(base) and (f.endswith('.zip') or '.z' in f)],
-            key=lambda x: (not x.endswith('.zip'), x)
-        )
-        for part in parts:
-            upload_file(part, part)
-            time.sleep(1)
-        send_message("✅ Large file forwarded (extract all parts and open the .zip).")
-    os.remove(path)
+        if file_size <= MAX_SIZE:
+            upload_file(path, file_name)
+            send_message("✅ Large file forwarded from Telegram.")
+        else:
+            send_message("⚠️ File too large, splitting…")
+            base = os.path.splitext(file_name)[0]
+            subprocess.run(["zip", "-s", "15m", f"{base}.zip", file_name], check=True)
+            parts = sorted(
+                [f for f in os.listdir('.') if f.startswith(base) and (f.endswith('.zip') or '.z' in f)],
+                key=lambda x: (not x.endswith('.zip'), x)
+            )
+            for part in parts:
+                upload_file(part, part)
+                time.sleep(1)
+            send_message("✅ Large file forwarded (extract all parts and open the .zip).")
+        os.remove(path)
+    finally:
+        await client.disconnect()
 
-with client:
-    client.loop.run_until_complete(main())
+import asyncio
+asyncio.run(main())
