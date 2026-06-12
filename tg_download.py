@@ -64,9 +64,27 @@ def unlock_queue():
         except Exception as e:
             print(f"[Unlock] Failed: {e}")
 
-# ---------- High‑speed MTProto download (2 MB chunks) ----------
+# ---------- Network speed test ----------
+def network_speed_test():
+    """Download a small ~1 MB file from Telegram's CDN to measure raw HTTP speed."""
+    test_url = "https://telegram.org/img/t_logo.png"  # ~9 KB, too small
+    # Use a known public Telegram file (a small sticker)
+    test_url = "https://cdn.telegram.org/file/tdlib_test_file"  # ~1 MB
+    try:
+        start = time.time()
+        resp = requests.get(test_url, timeout=30)
+        resp.raise_for_status()
+        data = resp.content
+        elapsed = time.time() - start
+        speed = len(data) / elapsed / (1024 * 1024)
+        print(f"[SpeedTest] Downloaded {len(data)//1024} KB in {elapsed:.1f}s ({speed:.1f} MB/s)")
+        return speed
+    except Exception as e:
+        print(f"[SpeedTest] Failed: {e}")
+        return 0
+
+# ---------- High‑speed MTProto download ----------
 async def download_large_file(client, msg, file_path, progress_callback):
-    """Download a document with 2 MB part size for maximum throughput."""
     doc = msg.document
     location = InputDocumentFileLocation(
         id=doc.id,
@@ -75,7 +93,7 @@ async def download_large_file(client, msg, file_path, progress_callback):
         thumb_size=''
     )
     total = doc.size
-    part_size = 2 * 1024 * 1024   # 2 MB chunks
+    part_size = 2 * 1024 * 1024
     with open(file_path, 'wb') as f:
         async for chunk in client.iter_download(location, offset=0, request_size=part_size):
             f.write(chunk)
@@ -89,6 +107,15 @@ async def main():
 
     download_dir = tempfile.mkdtemp()
     download_path = os.path.join(download_dir, safe_name)
+
+    # --- Run network speed test ---
+    net_speed = network_speed_test()
+    if net_speed > 0:
+        send_bale(f"🌐 Network baseline: {net_speed:.1f} MB/s")
+        send_telegram(f"🌐 Network baseline: {net_speed:.1f} MB/s")
+        if net_speed < 1.5:
+            send_bale("⚠️ Network is slow – download speed will be limited.")
+            send_telegram("⚠️ Network is slow – download speed will be limited.")
 
     client = TelegramClient(
         StringSession(session_str), API_ID, API_HASH,
@@ -108,22 +135,16 @@ async def main():
 
         file_size_mb = message.document.size / (1024 * 1024)
 
-        # Initial progress messages
         bale_res = send_bale(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         bale_progress_id = bale_res["result"]["message_id"]
         tg_res = send_telegram(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         tg_progress_id = tg_res["result"]["message_id"]
 
-        send_bale("⚡ Method: MTProto (2 MB chunks)")
-        send_telegram("⚡ Method: MTProto (2 MB chunks)")
-
         start = time.time()
         last_update = 0
 
-        # Progress callback – updates both Bale and Telegram
         def progress_callback(chunk_size, total):
             nonlocal last_update
-            # We accumulate downloaded bytes via a closure variable
             progress_callback.downloaded += chunk_size
             now = time.time()
             if total > 0 and now - last_update >= 8:
@@ -144,7 +165,7 @@ async def main():
         edit_bale(bale_progress_id, final_dl)
         edit_telegram(tg_progress_id, final_dl)
 
-        # --- Split & upload (unchanged) ---
+        # --- Split & upload ---
         if local_size <= MAX_SIZE:
             send_bale("📤 Uploading directly to Bale…")
             send_telegram("📤 Uploading directly to Bale…")
