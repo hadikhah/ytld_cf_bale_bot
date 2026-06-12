@@ -20,7 +20,7 @@ worker_url = os.environ.get("WORKER_URL")
 worker_secret = os.environ.get("WORKER_SECRET")
 
 MAX_SIZE = 15 * 1024 * 1024
-PARALLEL_CHUNKS = 12
+PARALLEL_CHUNKS = 8
 CHUNK_SIZE = 10 * 1024 * 1024
 
 # ---------- Messengers ----------
