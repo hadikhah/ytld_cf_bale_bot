@@ -35,3 +35,14 @@ jobs:
           MESSAGE_ID: ${{ inputs.message_id }}
           FILE_NAME: ${{ inputs.file_name }}
         run: python tg_download.py
+
+      - name: Unlock worker queue
+        if: always()
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CHAT_ID: ${{ inputs.bale_chat_id }}
+        run: |
+          curl -s -X POST "$WORKER_URL/github/done" \
+               -H "Content-Type: application/json" \
+               -d "{\"secret\": \"$WORKER_SECRET\", \"chat_id\": \"$CHAT_ID\"}"
