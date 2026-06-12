@@ -2,7 +2,7 @@
 import { Env } from './worker';
 import { triggerWorkflow } from './utils';
 
-const MAX_DIRECT_SIZE = 20 * 1024 * 1024;   // files above this → workflow
+const MAX_DIRECT_SIZE = 20 * 1024 * 1024;   // above 20 MB we must use channel + user account
 
 export async function processTelegramUpdate(env: Env, update: any) {
   const msg = update.message || update.channel_post;
@@ -107,19 +107,49 @@ export async function processTelegramUpdate(env: Env, update: any) {
     ? `📩 *${escapeMarkdown(msg.from?.first_name || 'Telegram')}*:\n${escapeMarkdown(msg.caption)}`
     : undefined;
 
-  // ---------- Large files (>20 MB) → workflow directly (Worker never calls getFile) ----------
+  // ---------- Large files (>20 MB): forward to channel → user account workflow ----------
   if (fileSize > MAX_DIRECT_SIZE) {
-    await sendTelegramMessage(env, chatId, '📦 File is large, processing via GitHub workflow…');
-    // Pass file_id, not URL – the workflow will fetch it
-    await triggerWorkflow(env, {
-      bale_chat_id: baleChatId,
-      file_id: fileId,
-      file_name: fileName,
-    }, 'telegram_transfer.yml');
+    const channelId = env.TG_CHANNEL_ID;
+    if (!channelId) {
+      await sendTelegramMessage(env, chatId, '❌ Large file support not configured.');
+      return;
+    }
+    try {
+      // Forward the message (the whole file) to the private channel
+      const fwdResp = await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/forwardMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: channelId,
+            from_chat_id: chatId,
+            message_id: msg.message_id,
+          }),
+        }
+      );
+      const fwdData: any = await fwdResp.json();
+      if (!fwdData.ok) throw new Error(fwdData.description);
+
+      const channelMsgId = fwdData.result.message_id;
+
+      await sendTelegramMessage(env, chatId, '📦 Large file — processing via user account…');
+
+      // Dispatch the workflow that uses the user session to download and send
+      await triggerWorkflow(env, {
+        bale_chat_id: baleChatId,
+        channel_id: channelId,
+        message_id: channelMsgId.toString(),
+        file_name: fileName,
+      }, 'telegram_transfer_large.yml');
+    } catch (e) {
+      console.error('Forward to channel failed:', e);
+      await sendTelegramMessage(env, chatId, '❌ Failed to process large file. Please try again.');
+    }
     return;
   }
 
-  // ---------- Small files (≤20 MB) → Worker gets URL ----------
+  // ---------- Small / medium files (≤20 MB) ----------
   const fileInfo = await getTelegramFile(env, fileId);
   if (!fileInfo || !fileInfo.file_path) {
     console.error(`getFile failed for ${fileName} (${fileSize} bytes)`);
@@ -165,7 +195,7 @@ export async function processTelegramUpdate(env: Env, update: any) {
   }
 }
 
-// ---------- helpers (unchanged) ----------
+// ---------- helpers ----------
 async function getTelegramFile(env: Env, fileId: string): Promise<{ file_path?: string } | null> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`;
   try {
