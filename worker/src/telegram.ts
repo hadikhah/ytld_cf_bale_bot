@@ -148,7 +148,9 @@ export async function processTelegramUpdate(env: Env, update: any) {
             channel_id: channelId,
             message_id: channelMsgId.toString(),
             file_name: fileName,
+            tg_chat_id: chatId.toString(),          // ← add this line
           }, 'telegram_transfer_large.yml');
+          
         } catch (e) {
           console.error('Forward to channel failed:', e);
           await sendTelegramMessage(env, chatId, '❌ Failed to process large file. Please try again.');
