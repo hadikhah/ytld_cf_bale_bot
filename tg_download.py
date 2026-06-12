@@ -1,6 +1,7 @@
 import os, subprocess, time, re, tempfile, asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import InputDocumentFileLocation
 import requests
 
 API_ID = 2040
@@ -63,6 +64,29 @@ def unlock_queue():
         except Exception as e:
             print(f"[Unlock] Failed: {e}")
 
+# ---------- Optimised download function ----------
+async def download_large_file(client, msg, file_path, progress_callback):
+    """Downloads a file using MTProto with 1 MB chunks for maximum speed."""
+    doc = msg.document
+    # Create an input file location for the document
+    location = InputDocumentFileLocation(
+        id=doc.id,
+        access_hash=doc.access_hash,
+        file_reference=doc.file_reference,
+        thumb_size=''   # empty for the main file, not thumbnail
+    )
+    # Total file size
+    total = doc.size
+    downloaded = 0
+    # Use 1 MB part size
+    part_size = 1024 * 1024
+    with open(file_path, 'wb') as f:
+        async for chunk in client.iter_download(location, offset=0, request_size=part_size):
+            f.write(chunk)
+            downloaded += len(chunk)
+            if progress_callback:
+                progress_callback(downloaded, total)
+
 # ---------- Main ----------
 async def main():
     safe_name = re.sub(r'[\\/*?:"<>|]', "_", original_name)
@@ -96,54 +120,26 @@ async def main():
         tg_res = send_telegram(f"📥 *{original_name}*\n0% · 0 / {file_size_mb:.1f} MB")
         tg_progress_id = tg_res["result"]["message_id"]
 
-        # Try to get a direct HTTP download URL
-        download_url = None
-        method_used = "MTProto (slower)"   # default
-        try:
-            download_url = await client.get_download_url(message, dc_id=message.document.dc_id)
-            print(f"[Download] Using direct HTTP URL")
-            method_used = "HTTP (fast)"
-        except Exception as e:
-            print(f"[Download] Direct URL failed: {e}, falling back to Telethon download")
-
-        # Inform the user which method is being used
-        send_bale(f"⚡ Method: {method_used}")
-        send_telegram(f"⚡ Method: {method_used}")
+        # Inform the user: we're using MTProto (optimized)
+        send_bale("⚡ Method: MTProto (optimized)")
+        send_telegram("⚡ Method: MTProto (optimized)")
 
         start = time.time()
         last_update = 0
 
-        if download_url:
-            # Direct HTTP download with streaming and progress
-            headers = {"User-Agent": "Mozilla/5.0"}
-            with requests.get(download_url, stream=True, headers=headers, timeout=600) as r:
-                r.raise_for_status()
-                total_length = int(r.headers.get('content-length', 0))
-                downloaded = 0
-                with open(download_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=1024*1024):  # 1 MB chunks
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        now = time.time()
-                        if total_length > 0 and now - last_update >= 8:
-                            pct = downloaded / total_length * 100
-                            text = f"📥 *{original_name}*\n{pct:.0f}% · {downloaded//(1024*1024)} / {total_length//(1024*1024)} MB"
-                            edit_bale(bale_progress_id, text)
-                            edit_telegram(tg_progress_id, text)
-                            last_update = now
-        else:
-            # Fallback to Telethon download
-            def progress_callback(received, total):
-                nonlocal last_update
-                now = time.time()
-                if total > 0 and now - last_update >= 8:
-                    pct = received / total * 100
-                    text = f"📥 *{original_name}*\n{pct:.0f}% · {received//(1024*1024)} / {total//(1024*1024)} MB"
-                    edit_bale(bale_progress_id, text)
-                    edit_telegram(tg_progress_id, text)
-                    last_update = now
+        # Progress callback for the download
+        def progress_callback(received, total):
+            nonlocal last_update
+            now = time.time()
+            if total > 0 and now - last_update >= 8:
+                pct = received / total * 100
+                text = f"📥 *{original_name}*\n{pct:.0f}% · {received//(1024*1024)} / {total//(1024*1024)} MB"
+                edit_bale(bale_progress_id, text)
+                edit_telegram(tg_progress_id, text)
+                last_update = now
 
-            await message.download_media(file=download_path, progress_callback=progress_callback)
+        # Start the high‑speed download
+        await download_large_file(client, message, download_path, progress_callback)
 
         elapsed = time.time() - start
         local_size = os.path.getsize(download_path)
