@@ -16,6 +16,10 @@ on:
         description: 'Original file name'
         required: true
 
+oncurrency:
+  group: large-telegram-transfer
+  cancel-in-progress: false
+
 jobs:
   transfer:
     runs-on: ubuntu-latest
