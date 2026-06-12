@@ -1,4 +1,4 @@
-import os, subprocess, time, re, tempfile, asyncio, io
+import os, subprocess, time, re, tempfile, asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import requests
@@ -98,11 +98,17 @@ async def main():
 
         # Try to get a direct HTTP download URL
         download_url = None
+        method_used = "MTProto (slower)"   # default
         try:
             download_url = await client.get_download_url(message, dc_id=message.document.dc_id)
-            print(f"[Download] Using direct HTTP URL (faster)")
+            print(f"[Download] Using direct HTTP URL")
+            method_used = "HTTP (fast)"
         except Exception as e:
             print(f"[Download] Direct URL failed: {e}, falling back to Telethon download")
+
+        # Inform the user which method is being used
+        send_bale(f"⚡ Method: {method_used}")
+        send_telegram(f"⚡ Method: {method_used}")
 
         start = time.time()
         last_update = 0
@@ -110,7 +116,7 @@ async def main():
         if download_url:
             # Direct HTTP download with streaming and progress
             headers = {"User-Agent": "Mozilla/5.0"}
-            with requests.get(download_url, stream=True, headers=headers, timeout=300) as r:
+            with requests.get(download_url, stream=True, headers=headers, timeout=600) as r:
                 r.raise_for_status()
                 total_length = int(r.headers.get('content-length', 0))
                 downloaded = 0
